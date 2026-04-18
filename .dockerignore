@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Go
+vendor/
+ai-proxy
+ai-revolver
+ai-revolver-backend
+*.exe
+*.exe~
+coverage.out
+
+# Node/Frontend
+frontend/node_modules/
+frontend/build/
+.npm
+
+# IDEs
+.idea/
+.vscode/
+
+# Data and Configs (Prevent leaking local config into image)
+data/
+config/
+*.db
+*.log
+.env
+.env.*
+
+# AI artifacts
+docs/ai/
+.superpowers/
+
+# Temporary
+*.swp
+*.swo
+*~

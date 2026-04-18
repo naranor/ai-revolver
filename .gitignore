@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build outputs
+build/
+frontend/build/
+*.exe
+*.exe~
+ai-proxy
+ai-revolver-backend
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+backend.log
+
+# Data
+data/
+
+# Database
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.swp
+*.swo
+*~
+/ai-proxy
+/ai-revolver
+/ai-revolver-backend
+/ai-revolver-fixed
+/ai-revolver-test
+/backend.log
+/goroutine_check.sh
+/main.go.bak
+.worktrees/
+.superpowers
+
+# Configuration
+config/config.json
+data/config.json
+
+# AI Artifacts
+docs/ai/
+!docs/ai/specs/
+.superpowers/
+ai-revolver-proxy.skill
+.kilo/
+/.agents/
+/.gemini/
+/bkp/

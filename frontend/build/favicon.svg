@@ -1,0 +1,20 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Gunmetal Background -->
+  <rect width="32" height="32" fill="#0A0B0C"/>
+  
+  <!-- Stylized Mechanical "R" -->
+  <path d="M8 6H18C21.3137 6 24 8.68629 24 12C24 15.3137 21.3137 18 18 18H12V26H8V6ZM12 10V14H18C19.1046 14 20 13.1046 20 12C20 10.8954 19.1046 10 18 10H12Z" fill="#C6962D"/>
+  <path d="M16 18L24 26H19L12 18H16Z" fill="#C6962D"/>
+  
+  <!-- Revolver Cylinder Dots (Small markings) -->
+  <circle cx="28" cy="6" r="1.5" fill="#C6962D" fill-opacity="0.3"/>
+  <circle cx="28" cy="10" r="1.5" fill="#C6962D" fill-opacity="0.3"/>
+  <circle cx="28" cy="14" r="1.5" fill="#C6962D" fill-opacity="0.3"/>
+  <circle cx="28" cy="18" r="1.5" fill="#C6962D" fill-opacity="0.3"/>
+  <circle cx="28" cy="22" r="1.5" fill="#C6962D" fill-opacity="0.3"/>
+  
+  <!-- Active Indicator (Phosphor Green) -->
+  <circle cx="28" cy="26" r="1.5" fill="#4ECB71">
+    <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
+  </circle>
+</svg>

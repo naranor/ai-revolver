@@ -1,0 +1,63 @@
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  govet:
+    enable:
+      - fieldalignment
+  dupl:
+    threshold: 100
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  misspell:
+    locale: US
+  lll:
+    line-length: 140
+  goimports:
+    local-prefixes: ai-proxy
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+
+linters:
+  # Включаем только необходимые и эффективные линтеры
+  disable-all: true
+  enable:
+    - bodyclose      # Проверка закрытия HTTP-тел (must-have для прокси)
+    - errcheck       # Проверка обработки ошибок
+    - gosec          # Безопасность
+    - govet          # Стандартные ошибки
+    - staticcheck    # Продвинутый статический анализ
+    - revive         # Идиоматичность и стиль
+    - gocyclo        # Сложность кода
+    - misspell       # Опечатки
+    - nakedret       # Поиск голых return в больших функциях
+    - prealloc       # Подсказки по оптимизации слайсов
+    - unconvert      # Удаление лишних приведений типов
+    - noctx          # Проверка передачи контекста в HTTP-запросы
+    - copyloopvar    # Замена устаревшего exportloopref
+
+issues:
+  # Исключаем некоторые частые, но не критичные сообщения
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  
+  exclude-dirs:
+    - frontend
+    - data
+
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - gocyclo
+        - errcheck
+
+run:
+  timeout: 5m
+  tests: true

@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 650" font-family="monospace">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="boxGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#2d3a4f"/>
+      <stop offset="100%" style="stop-color:#1f2937"/>
+    </linearGradient>
+    <linearGradient id="successGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#065f46"/>
+      <stop offset="100%" style="stop-color:#064e3b"/>
+    </linearGradient>
+    <linearGradient id="errorGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#991b1b"/>
+      <stop offset="100%" style="stop-color:#7f1d1d"/>
+    </linearGradient>
+    <linearGradient id="warningGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#92400e"/>
+      <stop offset="100%" style="stop-color:#78350f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="900" height="650" fill="url(#bgGrad)"/>
+  
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" fill="#d4af37" font-size="18" font-weight="bold">AI REVOLVER - ROUND-ROBIN MODEL SELECTION</text>
+  
+  <!-- Step 1: Get Candidates in Round-Robin -->
+  <rect x="50" y="50" width="200" height="60" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="150" y="70" text-anchor="middle" fill="#9ca3af" font-size="10">STEP 1: GET CANDIDATES</text>
+  <text x="150" y="87" text-anchor="middle" fill="#f3f4f6" font-size="10">Round-Robin Order</text>
+  <text x="150" y="100" text-anchor="middle" fill="#6b7280" font-size="9">(provider[0].model[0], provider[1].model[0], ...)</text>
+  
+  <!-- Round Robin Diagram -->
+  <rect x="280" y="50" width="400" height="60" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="480" y="70" text-anchor="middle" fill="#d4af37" font-size="10">ROUND-ROBIN ORDER (4 PROVIDERS)</text>
+  
+  <!-- Round 1 -->
+  <rect x="290" y="80" width="90" height="22" rx="3" fill="#065f46">
+    <text x="335" y="95" text-anchor="middle" fill="#d1fae5" font-size="8">P1:Model[0]</text>
+  </rect>
+  <rect x="390" y="80" width="90" height="22" rx="3" fill="#065f46">
+    <text x="435" y="95" text-anchor="middle" fill="#d1fae5" font-size="8">P2:Model[0]</text>
+  </rect>
+  <rect x="490" y="80" width="90" height="22" rx="3" fill="#065f46">
+    <text x="535" y="95" text-anchor="middle" fill="#d1fae5" font-size="8">P3:Model[0]</text>
+  </rect>
+  <rect x="590" y="80" width="90" height="22" rx="3" fill="#065f46">
+    <text x="635" y="95" text-anchor="middle" fill="#d1fae5" font-size="8">P4:Model[0]</text>
+  </rect>
+  
+  <text x="480" y="115" text-anchor="middle" fill="#6b7280" font-size="8">Round 1 →</text>
+  
+  <!-- Round 2 -->
+  <rect x="290" y="120" width="90" height="22" rx="3" fill="#78350f">
+    <text x="335" y="135" text-anchor="middle" fill="#fef3c7" font-size="8">P1:Model[1]</text>
+  </rect>
+  <rect x="390" y="120" width="90" height="22" rx="3" fill="#78350f">
+    <text x="435" y="135" text-anchor="middle" fill="#fef3c7" font-size="8">P2:Model[1]</text>
+  </rect>
+  <rect x="490" y="120" width="90" height="22" rx="3" fill="#78350f">
+    <text x="535" y="135" text-anchor="middle" fill="#fef3c7" font-size="8">P3:Model[1]</text>
+  </rect>
+  <rect x="590" y="120" width="90" height="22" rx="3" fill="#78350f">
+    <text x="635" y="135" text-anchor="middle" fill="#fef3c7" font-size="8">P4:Model[1]</text>
+  </rect>
+  
+  <text x="480" y="155" text-anchor="middle" fill="#6b7280" font-size="8">Round 2 →</text>
+  
+  <!-- Arrow down -->
+  <line x1="150" y1="115" x2="150" y2="170" stroke="#d4af37" stroke-width="2"/>
+  <polygon points="150,175 145,165 155,165" fill="#d4af37"/>
+  
+  <!-- Candidate Loop -->
+  <rect x="30" y="180" width="840" height="350" rx="10" fill="none" stroke="#4b5563" stroke-width="2" stroke-dasharray="5,5"/>
+  <text x="450" y="200" text-anchor="middle" fill="#9ca3af" font-size="12">CANDIDATE LOOP</text>
+  
+  <!-- Check Last Model -->
+  <rect x="60" y="220" width="140" height="50" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="130" y="240" text-anchor="middle" fill="#9ca3af" font-size="10">STEP 2</text>
+  <text x="130" y="257" text-anchor="middle" fill="#f3f4f6" font-size="11">Last Success?</text>
+  
+  <polygon points="260,245 290,220 320,245 290,270" fill="url(#warningGrad)" filter="url(#shadow)"/>
+  <text x="290" y="248" text-anchor="middle" fill="#f3f4f6" font-size="9">Yes?</text>
+  
+  <line x1="200" y1="245" x2="257" y2="245" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Yes - Prioritize -->
+  <rect x="350" y="220" width="100" height="50" rx="5" fill="url(#successGrad)" filter="url(#shadow)"/>
+  <text x="400" y="245" text-anchor="middle" fill="#9ca3af" font-size="10">YES</text>
+  <text x="400" y="260" text-anchor="middle" fill="#d1fae5" font-size="10">First</text>
+  
+  <!-- No - Continue loop -->
+  <line x1="290" y1="273" x2="290" y2="310" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="300" y="295" fill="#9ca3af" font-size="9">NO</text>
+  
+  <!-- Check Blocked -->
+  <rect x="220" y="310" width="140" height="50" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="290" y="330" text-anchor="middle" fill="#9ca3af" font-size="10">STEP 3</text>
+  <text x="290" y="347" text-anchor="middle" fill="#f3f4f6" font-size="11">IsBlocked?</text>
+  
+  <polygon points="430,335 460,310 490,335 460,360" fill="url(#errorGrad)" filter="url(#shadow)"/>
+  <text x="460" y="338" text-anchor="middle" fill="#f3f4f6" font-size="10">Yes?</text>
+  
+  <line x1="360" y1="335" x2="427" y2="335" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Skip -->
+  <rect x="520" y="310" width="80" height="50" rx="5" fill="url(#errorGrad)" filter="url(#shadow)"/>
+  <text x="560" y="335" text-anchor="middle" fill="#fca5a5" font-size="10">SKIP</text>
+  
+  <line x1="493" y1="335" x2="517" y2="335" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Check Rate Limit -->
+  <line x1="460" y1="363" x2="460" y2="400" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="470" y="385" fill="#9ca3af" font-size="9">NO</text>
+  
+  <rect x="380" y="400" width="160" height="50" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="460" y="420" text-anchor="middle" fill="#9ca3af" font-size="10">STEP 4</text>
+  <text x="460" y="437" text-anchor="middle" fill="#f3f4f6" font-size="11">RateLimited?</text>
+  
+  <polygon points="610,425 640,400 670,425 640,450" fill="url(#warningGrad)" filter="url(#shadow)"/>
+  <text x="640" y="428" text-anchor="middle" fill="#f3f4f6" font-size="9">Yes?</text>
+  
+  <line x1="540" y1="425" x2="607" y2="425" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Skip Rate Limited -->
+  <rect x="700" y="400" width="80" height="50" rx="5" fill="url(#warningGrad)" filter="url(#shadow)"/>
+  <text x="740" y="425" text-anchor="middle" fill="#fcd34d" font-size="10">SKIP</text>
+  
+  <line x1="673" y1="425" x2="697" y2="425" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Forward Request -->
+  <line x1="640" y1="453" x2="640" y2="490" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="650" y="475" fill="#9ca3af" font-size="9">NO</text>
+  
+  <rect x="560" y="490" width="160" height="50" rx="5" fill="url(#boxGrad)" filter="url(#shadow)"/>
+  <text x="640" y="510" text-anchor="middle" fill="#9ca3af" font-size="10">STEP 5</text>
+  <text x="640" y="527" text-anchor="middle" fill="#f3f4f6" font-size="11">Forward Request</text>
+  
+  <!-- Result Decision -->
+  <polygon points="800,515 830,490 860,515 830,540" fill="url(#successGrad)" filter="url(#shadow)"/>
+  <text x="830" y="518" text-anchor="middle" fill="#f3f4f6" font-size="9">OK?</text>
+  
+  <line x1="720" y1="515" x2="797" y2="515" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Success -->
+  <rect x="560" y="540" width="100" height="40" rx="5" fill="url(#successGrad)" filter="url(#shadow)"/>
+  <text x="610" y="565" text-anchor="middle" fill="#d1fae5" font-size="10">✓ SUCCESS</text>
+  
+  <line x1="830" y1="543" x2="830" y2="560" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="830" y1="540" x2="610" y2="540" stroke="#9ca3af" stroke-width="1.5"/>
+  
+  <!-- Error -->
+  <line x1="800" y1="515" x2="800" y2="580" stroke="#9ca3af" stroke-width="1.5"/>
+  <rect x="720" y="580" width="120" height="40" rx="5" fill="url(#errorGrad)" filter="url(#shadow)"/>
+  <text x="780" y="605" text-anchor="middle" fill="#fca5a5" font-size="10">✗ ERROR</text>
+  
+  <!-- Loop back -->
+  <path d="M 760 600 L 100 600 L 100 280 L 57 280" fill="none" stroke="#d4af37" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+  <text x="380" y="625" text-anchor="middle" fill="#d4af37" font-size="10">NEXT CANDIDATE</text>
+  
+  <!-- Fallback -->
+  <rect x="30" y="580" width="200" height="30" rx="5" fill="url(#warningGrad)" filter="url(#shadow)"/>
+  <text x="130" y="600" text-anchor="middle" fill="#fcd34d" font-size="10">FALLBACK: Best Latency</text>
+  
+  <!-- Legend -->
+  <rect x="700" y="550" width="180" height="80" rx="5" fill="rgba(0,0,0,0.3)" stroke="#4b5563"/>
+  <text x="790" y="570" text-anchor="middle" fill="#9ca3af" font-size="10">PRIORITY ORDER</text>
+  <text x="790" y="585" fill="#6b7280" font-size="8">1: ollama</text>
+  <text x="790" y="598" fill="#6b7280" font-size="8">2: groq</text>
+  <text x="790" y="611" fill="#6b7280" font-size="8">3: kilocode</text>
+  <text x="790" y="624" fill="#6b7280" font-size="8">4: openrouter</text>
+</svg>

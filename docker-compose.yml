@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  ai-proxy:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ai_proxy_data:/data
+    restart: unless-stopped
+
+volumes:
+  ai_proxy_data:
