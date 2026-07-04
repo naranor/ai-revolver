@@ -25,13 +25,35 @@ When a provider hits its rate limit, the proxy instantly and invisibly switches 
 
 ## 🚀 Features
 
-- ⚡ **Resilient Failover:** Automatic retry on backup providers after 15s if a provider hangs.
+- ⚡ **Resilient Failover:** Automatic retry on backup providers when an attempt times out or fails (per-candidate timeout defaults to **300s**, up to **5** attempts).
 - 🤖 **Multiple Providers:** Support for OpenRouter, Groq, OpenAI, Ollama, and more.
 - 🧠 **Auto Mode:** Automatic model selection based on priority and availability.
 - 🛡️ **Context-Aware:** Upstream requests are cancelled immediately when a client disconnects.
 - 🔌 **Streamable HTTP (MCP):** Full support for MCP clients via the `/mcp` endpoint.
 - 📊 **Built-in Analytics:** Statistics storage in SQLite with a sleek Web UI for monitoring.
 - 🚀 **High Performance:** Async logging (zerolog) and DB writes with a worker pool.
+
+## 📸 Web UI
+
+Built-in React dashboard for monitoring, configuration, and live testing.
+
+### Performance
+
+Real-time telemetry: request counts, success rate, latency, and per-model health.
+
+![Performance dashboard — global telemetry and model stats](docs/main-screen.png)
+
+### Loadout
+
+Manage providers, API keys, model payloads, priorities, and rate limits.
+
+![Loadout — provider and model configuration](docs/setup-screen.png)
+
+### Ballistics
+
+Interactive chat playground with tool-use support and model probing.
+
+![Ballistics — live model testing](docs/test-screen.png)
 
 ## 🛠️ Tech Stack
 
@@ -82,7 +104,7 @@ The configuration is stored in `data/config.json`. You can edit it manually or v
     {
       "name": "openai",
       "api_key": "your-api-key",
-      "base_url": "https://api.api.openai.com/v1",
+      "base_url": "https://api.openai.com/v1",
       "enabled": true,
       "models": [
         {
@@ -100,7 +122,13 @@ The configuration is stored in `data/config.json`. You can edit it manually or v
   "auto_mode": {
     "enabled": true,
     "fallback_strategy": "round-robin"
-  }
+  },
+  "max_retries": 5,
+  "connect_timeout_seconds": 5,
+  "response_timeout_seconds": 300,
+  "warmup_enabled": true,
+  "warmup_interval": 180,
+  "warmup_debounce": 60
 }
 ```
 </details>
@@ -108,13 +136,17 @@ The configuration is stored in `data/config.json`. You can edit it manually or v
 <details>
 <summary><strong>🔀 Model Selection Algorithm</strong></summary>
 
-1. **Round-Robin** - model[0] from all providers, then model[1], etc.
-2. **Last successful model priority** - if a model succeeded last time, it's first in the queue.
-3. **Block check** - model is skipped if:
-   - 2+ consecutive errors (blocked for configured duration, default 5 min).
-   - Latency > threshold (blocked for configured duration).
-4. **Rate limit check** - provider is skipped if rate limit is exceeded.
-5. **Fallback** - if all models are blocked, selects the model with the lowest latency.
+1. **Tiered selection** — candidates are ordered: **Active** → **Degraded** (high EWMA latency) → **BlockedTemp** (sorted by latency within each tier).
+2. **Round-robin within tiers** — model[0] from all providers, then model[1], etc.
+3. **Last successful model priority** — within the Active tier, the last successful model is tried first.
+4. **Health checks** — model status is updated per provider:model pair:
+   - EWMA latency > threshold (default **10000 ms**) → **Degraded** (lower priority, not blocked).
+   - 5xx / network timeout → **BlockedTemp** after **1** failure (exponential backoff).
+   - 429 / 400 / other errors → **BlockedTemp** for **5 minutes**.
+   - 401 / 404 → **BlockedFatal** (permanently skipped).
+5. **Rate limit check** — provider is skipped when `current_usage >= rate_limit`.
+6. **Failover limit** — up to `max_retries` attempts per request (default **5**).
+7. **Fallback** — if all models are blocked, selects the blocked model with the lowest EWMA latency.
 </details>
 
 <details>
@@ -123,10 +155,10 @@ The configuration is stored in `data/config.json`. You can edit it manually or v
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-port` | 8081 | Port to listen on |
-| `-latency-threshold` | 10000 | Latency threshold in ms to mark model as slow (0 = disable) |
-| `-block-duration` | 5 | Duration in minutes to block models (0 = disable) |
+| `-latency-threshold` | 10000 | Latency threshold in ms to mark model as degraded (0 = disable) |
+| `-block-duration` | 5 | Failure-tracker cleanup window in minutes (0 = disable cleanup) |
 | `-max-idle-conns` | 100 | Maximum idle connections in pool |
-| `-max-idle-conns-per-host` | 100 | Maximum idle connections per host (prevents blocking) |
+| `-max-idle-conns-per-host` | 20 | Maximum idle connections per host (prevents blocking) |
 | `-idle-conn-timeout` | 90s | Idle connection timeout |
 | `-stream-buffer-size` | 2MB | Buffer size for streaming responses |
 | `-config` | data/config.json | Path to config file |

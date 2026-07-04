@@ -6,7 +6,7 @@ This document describes the AI agents and providers used in the AI Revolver prox
 
 1. **Foundational Context**: Always use `AGENTS.md` as the primary foundational instruction file (equivalent to `GEMINI.md`) at the start of a session. If both exist, `AGENTS.md` takes precedence.
 2. **Context Propagation**: Always pass `context.Context` through all layers of the application. Upstream requests MUST be context-aware (using `http.NewRequestWithContext`).
-3. **Error Handling**: Follow the 15-second per-candidate timeout rule in proxy logic.
+3. **Error Handling**: Per-candidate upstream attempts use `response_timeout_seconds` from config (default **300s**). Failover to the next candidate occurs when the attempt times out or returns a non-200 status.
 4. **Stat Retention**: Ensure all request metrics are persisted to the SQLite stats database.
 5. **Operational Continuity**: NEVER kill the service running on port 8081. If port 8081 is occupied, use an alternative port.
 6. **Isolated Testing**: For any test execution, always use a port other than 8080 or 8081 to avoid interference with the live service.
@@ -22,19 +22,20 @@ AI Revolver is a proxy service that routes AI requests to multiple upstream prov
 │                        AI Revolver                              │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │  /v1/*      │  │  /mcp       │  │  Web UI (React)         │ │
-│  │  OpenAI API │  │  Streamable │  │  /config /test /stats   │ │
+│  │  /api/v1/*  │  │  /mcp       │  │  Web UI (React)         │ │
+│  │  OpenAI API │  │  Streamable │  │  / /config /test        │ │
 │  └──────┬──────┘  │  HTTP (MCP) │  └─────────────────────────┘ │
 │         │         └──────┬──────┘                               │
 │         └────────────────┼──────────────────────────────────────┘
 │                          │
 │  ┌───────────────────────▼───────────────────────┐
 │  │              Model Selection                  │
-│  │  • Round-robin across providers               │
-│  │  • Last successful model priority             │
-│  │  • Auto-failover on errors                    │
+│  │  • Tiered: Active → Degraded → BlockedTemp    │
+│  │  • Round-robin within priority tiers          │
+│  │  • Last successful model priority (Active)    │
+│  │  • Auto-failover on errors (max_retries)      │
 │  │  • Rate limiting                              │
-│  │  • Model blocking (configurable duration)     │
+│  │  • Model blocking / EWMA degradation          │
 │  └───────────────────────┬───────────────────────┘
 │                          │
 │  ┌───────────────────────▼───────────────────────┐
@@ -122,39 +123,64 @@ The proxy supports automatic provider selection:
   "auto_mode": {
     "enabled": true,
     "fallback_strategy": "round-robin"
-  }
+  },
+  "max_retries": 5,
+  "connect_timeout_seconds": 5,
+  "response_timeout_seconds": 300,
+  "warmup_enabled": true,
+  "warmup_interval": 180,
+  "warmup_debounce": 60
 }
 ```
+
+| Config field | Default | Description |
+|--------------|---------|-------------|
+| `max_retries` | 5 | Maximum failover attempts per request |
+| `connect_timeout_seconds` | 5 | TCP/TLS connect timeout |
+| `response_timeout_seconds` | 300 | Per-candidate upstream attempt timeout |
+| `warmup_interval` | 180 | Warmup tick interval (seconds) |
+| `warmup_debounce` | 60 | Debounce after status change (seconds) |
 
 ### Stability & Performance
 
 - **Context-Aware Cancellation**: If a client disconnects, the proxy immediately cancels all pending upstream requests to prevent resource leaks and reduce provider costs.
-- **Resilient Failover**: Each provider connection attempt has a **15-second timeout**. If a provider is unresponsive, the proxy fails over to the next candidate immediately.
-- **Optimized Connection Pooling**: Configured with `MaxIdleConnsPerHost: 100` to prevent head-of-line blocking under heavy load.
-- **Zero-Timeout Read**: Server is configured with `ReadTimeout: 0` to support multi-megabyte prompt uploads without premature disconnection.
+- **Resilient Failover**: Each candidate attempt uses a per-attempt timeout equal to `response_timeout_seconds` from config (default **300s**, overridable via `-config`). On timeout or non-200 response, the proxy tries the next candidate (up to `max_retries`, default **5**).
+- **Connection Timeouts**: TCP/TLS connect timeout defaults to **5s** (`connect_timeout_seconds` in config).
+- **Optimized Connection Pooling**: Defaults — `MaxIdleConns: 100`, `MaxIdleConnsPerHost: 20` (CLI flags `-max-idle-conns`, `-max-idle-conns-per-host`).
+- **Zero-Timeout Read**: Server `ReadTimeout: 0` supports large prompt uploads; `ReadHeaderTimeout: 10s`, `WriteTimeout: 10min`, `IdleTimeout: 120s`.
+- **Warmup**: Optional background warmup (`warmup_enabled`, interval default **180s**, debounce default **60s**).
 
 ### Provider Selection Logic
 
-1. Providers are sorted by priority (lower number = higher priority)
-2. In auto mode, requests use round-robin across all models
-3. When a provider hits rate limits, the system automatically falls back to the next available provider
-4. Request metrics are tracked per-provider and per-model
-5. Models are blocked after failures (configurable duration via `-block-duration`)
-6. **Cancellation Check**: Before starting any candidate attempt, the proxy checks if the request context has been cancelled.
+1. Providers are sorted by priority (lower number = higher priority); disabled providers are skipped.
+2. Candidates are assembled in tiers: **Active** → **Degraded** (high EWMA latency) → **BlockedTemp** (sorted by EWMA latency within each tier).
+3. Within the Active tier, the last successful model is tried first; remaining Active candidates follow round-robin order by model index across providers.
+4. When a provider's `current_usage >= rate_limit`, it is skipped.
+5. Failover stops after `max_retries` attempts (default **5**, configurable in `config.json`).
+6. Request metrics are tracked per-provider and per-model in SQLite.
+7. **Cancellation Check**: Before starting any candidate attempt, the proxy checks if the request context has been cancelled.
+8. **Fallback**: If all candidates are blocked, the proxy may attempt the blocked model with the lowest EWMA latency.
 
 ### Rate Limiting
 
-Each provider has a configurable rate limit (default: 30 requests). When exceeded:
-- Requests are redirected to fallback providers
-- Rate limit resets are tracked in the database
+Each provider has a configurable `rate_limit` (per-provider, set in `config.json`; no global default). When `current_usage >= rate_limit`:
+- The provider is skipped during candidate selection
+- Rate limit events are logged to the database
 
-### Model Blocking
+### Model Blocking & Degradation
 
-Models are automatically blocked when:
-- 2+ consecutive errors occur
-- Latency exceeds configured threshold (`-latency-threshold`)
+Model health is tracked per provider:model pair with EWMA latency (α = 0.2).
 
-Block duration is configurable via `-block-duration` (default: 5 minutes).
+| Condition | Result |
+|-----------|--------|
+| EWMA latency > `-latency-threshold` (default **10000 ms**) | **Degraded** — still used, but lower priority (Tier 2) |
+| 5xx or network/timeout (HTTP 0) | **BlockedTemp** after **1** failure; exponential backoff: `(2^level × 2)` minutes |
+| 429 Too Many Requests | **BlockedTemp** for **5 minutes** |
+| 400 Bad Request | **BlockedTemp** for **5 minutes** |
+| 401 / 404 | **BlockedFatal** — permanently skipped |
+| Other HTTP errors | **BlockedTemp** for **5 minutes** |
+
+The `-block-duration` flag (default **5 minutes**) controls the failure-tracker cleanup window (`failureCooldown`), not the block durations above.
 
 ## Usage
 
@@ -163,7 +189,7 @@ Block duration is configurable via `-block-duration` (default: 5 minutes).
 Send requests to the proxy endpoint with the desired model:
 
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://localhost:8081/api/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "arcee-ai/trinity-large-preview:free",
@@ -174,7 +200,7 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 ### Streaming Requests
 
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://localhost:8081/api/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "giga-potato-thinking",
@@ -285,9 +311,9 @@ To add a new AI provider:
 |--------|---------|-------------|
 | `-port` | 8081 | Port to listen on |
 | `-latency-threshold` | 10000 | Latency threshold in ms (0 = disable) |
-| `-block-duration` | 5 | Block duration in minutes (0 = disable) |
+| `-block-duration` | 5 | Failure-tracker cleanup window in minutes (0 = disable cleanup) |
 | `-max-idle-conns` | 100 | Maximum idle connections in pool |
-| `-max-idle-conns-per-host` | 100 | Maximum idle connections per host |
+| `-max-idle-conns-per-host` | 20 | Maximum idle connections per host |
 | `-idle-conn-timeout` | 90s | Idle connection timeout |
 | `-stream-buffer-size` | 2MB | Buffer size for streaming responses |
 | `-config` | data/config.json | Path to config file |
