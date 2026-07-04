@@ -43,5 +43,9 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
     "prettier": "^3.8.1"
+  },
+  "overrides": {
+    "nth-check": "2.1.1",
+    "underscore": "1.13.8"
   }
 }
