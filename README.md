@@ -33,6 +33,28 @@ When a provider hits its rate limit, the proxy instantly and invisibly switches 
 - 📊 **Built-in Analytics:** Statistics storage in SQLite with a sleek Web UI for monitoring.
 - 🚀 **High Performance:** Async logging (zerolog) and DB writes with a worker pool.
 
+## 📸 Web UI
+
+Built-in React dashboard for monitoring, configuration, and live testing.
+
+### Performance
+
+Real-time telemetry: request counts, success rate, latency, and per-model health.
+
+![Performance dashboard — global telemetry and model stats](docs/main-screen.png)
+
+### Loadout
+
+Manage providers, API keys, model payloads, priorities, and rate limits.
+
+![Loadout — provider and model configuration](docs/setup-screen.png)
+
+### Ballistics
+
+Interactive chat playground with tool-use support and model probing.
+
+![Ballistics — live model testing](docs/test-screen.png)
+
 ## 🛠️ Tech Stack
 
 | Category | Technology | Description |
