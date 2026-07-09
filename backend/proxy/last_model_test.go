@@ -78,6 +78,7 @@ func TestClearLastSuccessfulModel(t *testing.T) {
 }
 
 func TestClearLastSuccessfulModelIf(t *testing.T) {
+	defer ClearLastSuccessfulModel()
 	t.Run("clears when matching", func(t *testing.T) {
 		SetLastSuccessfulModel("provider-a", "model-a", 50)
 		ClearLastSuccessfulModelIf("provider-a", "model-a")

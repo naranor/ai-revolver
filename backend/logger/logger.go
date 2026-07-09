@@ -16,6 +16,7 @@ var (
 	logChan     chan logEntry
 	wg          sync.WaitGroup
 	initialized bool
+	mu          sync.Mutex
 )
 
 type logEntry struct {
@@ -70,24 +71,33 @@ func asyncWriter() {
 	}
 }
 
-// Shutdown gracefully stops the logger, flushing remaining entries
+// Shutdown gracefully stops the logger, flushing remaining entries.
+// It is idempotent: repeated calls are safe no-ops.
 func Shutdown() {
-	if initialized {
-		close(logChan)
-		wg.Wait()
+	mu.Lock()
+	if !initialized {
+		mu.Unlock()
+		return
 	}
+	initialized = false
+	ch := logChan
+	mu.Unlock()
+	close(ch)
+	wg.Wait()
 }
 
 func send(level zerolog.Level, msg string, fields map[string]interface{}) {
+	mu.Lock()
 	if !initialized {
+		mu.Unlock()
 		return
 	}
-
 	select {
 	case logChan <- logEntry{level: level, msg: msg, fields: fields}:
 	default:
 		// Channel full, drop to prevent blocking
 	}
+	mu.Unlock()
 }
 
 // Debug logs a debug message
