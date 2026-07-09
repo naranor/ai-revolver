@@ -786,3 +786,282 @@ func TestChatCompletionsHandler(t *testing.T) {
 			status, http.StatusInternalServerError)
 	}
 }
+
+func TestHealthHandler(t *testing.T) {
+	req, err := http.NewRequestWithContext(context.Background(), "GET", "/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(healthHandler)
+	handler.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("healthHandler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+	if rr.Body.String() != "OK" {
+		t.Errorf("healthHandler returned wrong body: got %q want %q", rr.Body.String(), "OK")
+	}
+}
+
+func TestTrimTrailingSlash(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"http://example.com/", "http://example.com"},
+		{"http://example.com///", "http://example.com"},
+		{"http://example.com", "http://example.com"},
+		{"", ""},
+		{"/", ""},
+	}
+
+	for _, tt := range tests {
+		result := TrimTrailingSlash(tt.input)
+		if result != tt.expected {
+			t.Errorf("TrimTrailingSlash(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestTrimSuffix(t *testing.T) {
+	tests := []struct {
+		s        string
+		suffix   string
+		expected string
+	}{
+		{"http://example.com/api", "/api", "http://example.com"},
+		{"http://example.com", "/api", "http://example.com"},
+		{"hello world", " world", "hello"},
+		{"", "/api", ""},
+	}
+
+	for _, tt := range tests {
+		result := TrimSuffix(tt.s, tt.suffix)
+		if result != tt.expected {
+			t.Errorf("TrimSuffix(%q, %q) = %q, want %q", tt.s, tt.suffix, result, tt.expected)
+		}
+	}
+}
+
+func TestWriteJSON(t *testing.T) {
+	rr := httptest.NewRecorder()
+	WriteJSON(rr, map[string]interface{}{"key": "value", "num": 42})
+
+	if rr.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("Expected Content-Type application/json, got %q", rr.Header().Get("Content-Type"))
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Failed to unmarshal JSON response: %v", err)
+	}
+	if result["key"] != "value" {
+		t.Errorf("Expected key 'value', got %v", result["key"])
+	}
+}
+
+func TestErrorString(t *testing.T) {
+	tests := []struct {
+		input    error
+		expected string
+	}{
+		{nil, ""},
+		{errors.New("some error"), "some error"},
+	}
+
+	for _, tt := range tests {
+		result := errorString(tt.input)
+		if result != tt.expected {
+			t.Errorf("errorString(%v) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestFindProvider(t *testing.T) {
+	originalGetConfig := config.GetConfig
+	config.GetConfig = func() config.Config {
+		return config.Config{
+			Providers: []config.Provider{
+				{Name: "provider-a"},
+				{Name: "provider-b"},
+			},
+		}
+	}
+	defer func() { config.GetConfig = originalGetConfig }()
+
+	t.Run("found", func(t *testing.T) {
+		p := FindProvider("provider-b")
+		if p == nil {
+			t.Fatal("Expected provider, got nil")
+		}
+		if p.Name != "provider-b" {
+			t.Errorf("Expected provider 'provider-b', got '%s'", p.Name)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		p := FindProvider("unknown")
+		if p != nil {
+			t.Errorf("Expected nil for unknown provider, got %+v", p)
+		}
+	})
+}
+
+func TestBuildModelsEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider config.Provider
+		expected string
+	}{
+		{
+			name:     "standard provider",
+			provider: config.Provider{Name: "openai", BaseURL: "https://api.openai.com/v1"},
+			expected: "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "provider with trailing slash",
+			provider: config.Provider{Name: "openai", BaseURL: "https://api.openai.com/v1/"},
+			expected: "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "native ollama",
+			provider: config.Provider{Name: "ollama", BaseURL: "http://localhost:11434"},
+			expected: "http://localhost:11434/api/tags",
+		},
+		{
+			name:     "native ollama with /api",
+			provider: config.Provider{Name: "ollama", BaseURL: "http://localhost:11434/api"},
+			expected: "http://localhost:11434/api/tags",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildModelsEndpoint(&tt.provider)
+			if got != tt.expected {
+				t.Errorf("BuildModelsEndpoint() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWriteOllamaModelsResponse(t *testing.T) {
+	t.Run("valid response", func(t *testing.T) {
+		ollamaBody := `{"models":[{"name":"llama3","modified_at":"2024-01-01","digest":"abc123","size":4000000000,"details":{"format":"gguf","family":"llama","parameter_size":"8B","quantization_level":"Q4_0","families":["llama"]}}]}`
+		body := io.NopCloser(bytes.NewReader([]byte(ollamaBody)))
+
+		rr := httptest.NewRecorder()
+		WriteOllamaModelsResponse(rr, body)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected 200, got %d", rr.Code)
+		}
+		var result map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+			t.Fatalf("Failed to unmarshal response: %v", err)
+		}
+		if result["object"] != "list" {
+			t.Errorf("Expected object 'list', got %v", result["object"])
+		}
+		data, ok := result["data"].([]interface{})
+		if !ok || len(data) != 1 {
+			t.Fatalf("Expected 1 model in data, got %v", result["data"])
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte("not json")))
+		rr := httptest.NewRecorder()
+		WriteOllamaModelsResponse(rr, body)
+		if rr.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 for invalid JSON, got %d", rr.Code)
+		}
+	})
+}
+
+func TestFindOllamaModel(t *testing.T) {
+	ollamaBody := `{"models":[{"name":"llama3","modified_at":"2024-01-01","digest":"abc","size":1000,"details":{"format":"gguf","family":"llama","parameter_size":"8B","quantization_level":"Q4_0","families":["llama"]}}]}`
+
+	t.Run("model found", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte(ollamaBody)))
+		rr := httptest.NewRecorder()
+		FindOllamaModel(rr, body, "llama3")
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected 200, got %d", rr.Code)
+		}
+		var result map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+			t.Fatalf("Failed to unmarshal response: %v", err)
+		}
+		if result["id"] != "llama3" {
+			t.Errorf("Expected id 'llama3', got %v", result["id"])
+		}
+	})
+
+	t.Run("model not found", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte(ollamaBody)))
+		rr := httptest.NewRecorder()
+		FindOllamaModel(rr, body, "unknown-model")
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("Expected 404, got %d", rr.Code)
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte("not json")))
+		rr := httptest.NewRecorder()
+		FindOllamaModel(rr, body, "llama3")
+		if rr.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 for invalid JSON, got %d", rr.Code)
+		}
+	})
+}
+
+func TestFindOpenAIModel(t *testing.T) {
+	openAIBody := `{"object":"list","data":[{"id":"gpt-4","object":"model","created":1677858242,"owned_by":"openai"},{"id":"gpt-3.5-turbo","object":"model","created":1677610602,"owned_by":"openai"}]}`
+
+	t.Run("model found", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte(openAIBody)))
+		rr := httptest.NewRecorder()
+		FindOpenAIModel(rr, body, "gpt-4")
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected 200, got %d", rr.Code)
+		}
+		var result map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+			t.Fatalf("Failed to unmarshal response: %v", err)
+		}
+		if result["id"] != "gpt-4" {
+			t.Errorf("Expected id 'gpt-4', got %v", result["id"])
+		}
+	})
+
+	t.Run("model not found", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte(openAIBody)))
+		rr := httptest.NewRecorder()
+		FindOpenAIModel(rr, body, "unknown-model")
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("Expected 404, got %d", rr.Code)
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte("not json")))
+		rr := httptest.NewRecorder()
+		FindOpenAIModel(rr, body, "gpt-4")
+		if rr.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 for invalid JSON, got %d", rr.Code)
+		}
+	})
+
+	t.Run("response without data array returns full result", func(t *testing.T) {
+		body := io.NopCloser(bytes.NewReader([]byte(`{"id":"gpt-4","object":"model"}`)))
+		rr := httptest.NewRecorder()
+		FindOpenAIModel(rr, body, "gpt-4")
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected 200 for non-list response, got %d", rr.Code)
+		}
+	})
+}

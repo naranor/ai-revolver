@@ -297,7 +297,410 @@ func TestIsRateLimited(t *testing.T) {
 	}
 }
 
-// Helper to create Provider from name
 func testProvider(name string) config.Provider {
 	return config.Provider{Name: name}
+}
+
+func TestBuildEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider config.Provider
+		path     string
+		expected string
+	}{
+		{
+			name:     "standard OpenAI provider",
+			provider: config.Provider{Name: "openai", BaseURL: "https://api.openai.com/v1"},
+			path:     "/chat/completions",
+			expected: "https://api.openai.com/v1/chat/completions",
+		},
+		{
+			name:     "provider with trailing slash",
+			provider: config.Provider{Name: "openai", BaseURL: "https://api.openai.com/v1/"},
+			path:     "/models",
+			expected: "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "native ollama chat",
+			provider: config.Provider{Name: "ollama", BaseURL: "http://localhost:11434"},
+			path:     "/chat/completions",
+			expected: "http://localhost:11434/api/chat",
+		},
+		{
+			name:     "native ollama models",
+			provider: config.Provider{Name: "ollama", BaseURL: "http://localhost:11434"},
+			path:     "/models",
+			expected: "http://localhost:11434/api/tags",
+		},
+		{
+			name:     "native ollama with /api suffix in base",
+			provider: config.Provider{Name: "ollama", BaseURL: "http://localhost:11434/api"},
+			path:     "/chat/completions",
+			expected: "http://localhost:11434/api/chat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildEndpoint(tt.provider, tt.path)
+			if got != tt.expected {
+				t.Errorf("buildEndpoint() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAdjustGroqReasoningEffort(t *testing.T) {
+	payload := map[string]interface{}{
+		"model":            "test",
+		"reasoning_effort": "high",
+		"other":            "value",
+	}
+
+	adjustGroqReasoningEffort(payload)
+
+	if _, ok := payload["reasoning_effort"]; ok {
+		t.Error("reasoning_effort should have been removed")
+	}
+	if payload["other"] != "value" {
+		t.Error("other fields should be preserved")
+	}
+}
+
+func TestFilterCommonUnsupportedParams(t *testing.T) {
+	t.Run("removes store and max_completion_tokens for all providers", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"store":                "true",
+			"max_completion_tokens": 1000,
+			"model":                "test",
+		}
+		filterCommonUnsupportedParams("openrouter", payload)
+		if _, ok := payload["store"]; ok {
+			t.Error("store should have been removed")
+		}
+		if _, ok := payload["max_completion_tokens"]; ok {
+			t.Error("max_completion_tokens should have been removed")
+		}
+		if payload["model"] != "test" {
+			t.Error("model should be preserved")
+		}
+	})
+
+	t.Run("removes reasoning_effort for Mistral", func(t *testing.T) {
+		payload := map[string]interface{}{"reasoning_effort": "high"}
+		filterCommonUnsupportedParams("Mistral", payload)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should be removed for Mistral")
+		}
+	})
+
+	t.Run("removes reasoning_effort for ollama", func(t *testing.T) {
+		payload := map[string]interface{}{"reasoning_effort": "medium"}
+		filterCommonUnsupportedParams("ollama", payload)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should be removed for ollama")
+		}
+	})
+
+	t.Run("preserves reasoning_effort for groq (handled separately)", func(t *testing.T) {
+		payload := map[string]interface{}{"reasoning_effort": "low"}
+		filterCommonUnsupportedParams("groq", payload)
+		// groq reasoning_effort is removed by adjustGroqReasoningEffort, not here
+		if _, ok := payload["reasoning_effort"]; !ok {
+			t.Error("reasoning_effort should still be present after filterCommonUnsupportedParams for groq")
+		}
+	})
+}
+
+func TestAdjustProviderPayload(t *testing.T) {
+	t.Run("groq removes reasoning_effort and common params", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"reasoning_effort":      "high",
+			"store":                 "true",
+			"max_completion_tokens": 500,
+			"model":                 "test",
+		}
+		adjustProviderPayload("groq", payload)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should be removed for groq")
+		}
+		if _, ok := payload["store"]; ok {
+			t.Error("store should be removed")
+		}
+	})
+
+	t.Run("Mistral removes reasoning_effort", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"reasoning_effort": "high",
+			"model":            "mistral-large",
+		}
+		adjustProviderPayload("Mistral", payload)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should be removed for Mistral")
+		}
+	})
+}
+
+func TestBuildOllamaBody(t *testing.T) {
+	t.Run("basic request", func(t *testing.T) {
+		req := Request{
+			Messages:  []Message{{Role: "user", Content: "hello"}},
+			Stream:    false,
+			MaxTokens: 200,
+		}
+		body, err := buildOllamaBody("llama3", req)
+		if err != nil {
+			t.Fatalf("buildOllamaBody() error = %v", err)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal ollama body: %v", err)
+		}
+
+		if payload["model"] != "llama3" {
+			t.Errorf("Expected model 'llama3', got %v", payload["model"])
+		}
+		if payload["stream"] != false {
+			t.Errorf("Expected stream false, got %v", payload["stream"])
+		}
+		opts, ok := payload["options"].(map[string]interface{})
+		if !ok {
+			t.Error("Expected options map")
+		} else {
+			if opts["num_predict"] != float64(200) {
+				t.Errorf("Expected num_predict 200, got %v", opts["num_predict"])
+			}
+		}
+	})
+
+	t.Run("with json response_format", func(t *testing.T) {
+		rawBody, _ := json.Marshal(map[string]interface{}{
+			"response_format": map[string]interface{}{"type": "json_object"},
+		})
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "json please"}},
+			RawBody:  rawBody,
+		}
+		body, err := buildOllamaBody("llama3", req)
+		if err != nil {
+			t.Fatalf("buildOllamaBody() error = %v", err)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal ollama body: %v", err)
+		}
+		if payload["format"] != "json" {
+			t.Errorf("Expected format 'json', got %v", payload["format"])
+		}
+	})
+
+	t.Run("with keep_alive", func(t *testing.T) {
+		rawBody, _ := json.Marshal(map[string]interface{}{
+			"keep_alive": "5m",
+		})
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawBody,
+		}
+		body, err := buildOllamaBody("llama3", req)
+		if err != nil {
+			t.Fatalf("buildOllamaBody() error = %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal ollama body: %v", err)
+		}
+		if payload["keep_alive"] != "5m" {
+			t.Errorf("Expected keep_alive '5m', got %v", payload["keep_alive"])
+		}
+	})
+
+	t.Run("with tools", func(t *testing.T) {
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "use tool"}},
+			Tools:    []interface{}{map[string]interface{}{"name": "search"}},
+		}
+		body, err := buildOllamaBody("llama3", req)
+		if err != nil {
+			t.Fatalf("buildOllamaBody() error = %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal ollama body: %v", err)
+		}
+		if payload["tools"] == nil {
+			t.Error("Expected tools to be present")
+		}
+	})
+}
+
+func TestBuildRequestBody(t *testing.T) {
+	t.Run("standard provider returns OpenAI body", func(t *testing.T) {
+		provider := config.Provider{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1"}
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "hello"}},
+		}
+		body, err := buildRequestBody(provider, "test-model", req)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal body: %v", err)
+		}
+		if payload["model"] != "test-model" {
+			t.Errorf("Expected model 'test-model', got %v", payload["model"])
+		}
+	})
+
+	t.Run("groq provider filters params", func(t *testing.T) {
+		provider := config.Provider{Name: "groq"}
+		rawBody, _ := json.Marshal(map[string]interface{}{
+			"store":            "true",
+			"reasoning_effort": "high",
+		})
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawBody,
+		}
+		body, err := buildRequestBody(provider, "llama3", req)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal body: %v", err)
+		}
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should have been removed for groq")
+		}
+		if _, ok := payload["store"]; ok {
+			t.Error("store should have been removed for groq")
+		}
+	})
+
+	t.Run("native ollama returns ollama body", func(t *testing.T) {
+		provider := config.Provider{Name: "ollama", BaseURL: "http://localhost:11434"}
+		req := Request{
+			Messages: []Message{{Role: "user", Content: "hello"}},
+		}
+		body, err := buildRequestBody(provider, "llama3", req)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Failed to unmarshal body: %v", err)
+		}
+		if payload["model"] != "llama3" {
+			t.Errorf("Expected model 'llama3', got %v", payload["model"])
+		}
+		// Ollama body uses a 'stream' field at root, distinguishing it from OpenAI-format bodies
+		if _, ok := payload["stream"]; !ok {
+			t.Error("Expected 'stream' field in ollama body")
+		}
+	})
+}
+
+func TestFindModelInProvider(t *testing.T) {
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{
+				Name: "provider1",
+				Models: []config.Model{
+					{Name: "model-a"},
+					{Name: "model-b"},
+				},
+			},
+			{
+				Name: "provider2",
+				Models: []config.Model{
+					{Name: "model-c"},
+				},
+			},
+		},
+	}
+
+	t.Run("found", func(t *testing.T) {
+		p, m, err := findModelInProvider(nil, cfg, "provider1", "model-b") //nolint:staticcheck
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Name != "provider1" {
+			t.Errorf("Expected provider 'provider1', got '%s'", p.Name)
+		}
+		if m != "model-b" {
+			t.Errorf("Expected model 'model-b', got '%s'", m)
+		}
+	})
+
+	t.Run("provider not found", func(t *testing.T) {
+		_, _, err := findModelInProvider(nil, cfg, "unknown-provider", "model-a") //nolint:staticcheck
+		if err == nil {
+			t.Error("Expected error for unknown provider")
+		}
+	})
+
+	t.Run("model not found in provider", func(t *testing.T) {
+		_, _, err := findModelInProvider(nil, cfg, "provider1", "model-z") //nolint:staticcheck
+		if err == nil {
+			t.Error("Expected error for unknown model")
+		}
+	})
+}
+
+func TestFindModelAnywhere(t *testing.T) {
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{
+				Name: "provider1",
+				Models: []config.Model{
+					{Name: "model-a"},
+				},
+			},
+			{
+				Name: "provider2",
+				Models: []config.Model{
+					{Name: "model-b"},
+				},
+			},
+		},
+	}
+	config.LoadTestConfig(cfg)
+	defer config.ResetTestConfig()
+
+	t.Run("found in first provider", func(t *testing.T) {
+		p, m, err := findModelAnywhere(nil, "model-a") //nolint:staticcheck
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Name != "provider1" {
+			t.Errorf("Expected provider 'provider1', got '%s'", p.Name)
+		}
+		if m != "model-a" {
+			t.Errorf("Expected model 'model-a', got '%s'", m)
+		}
+	})
+
+	t.Run("found in second provider", func(t *testing.T) {
+		p, m, err := findModelAnywhere(nil, "model-b") //nolint:staticcheck
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Name != "provider2" {
+			t.Errorf("Expected provider 'provider2', got '%s'", p.Name)
+		}
+		if m != "model-b" {
+			t.Errorf("Expected model 'model-b', got '%s'", m)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, _, err := findModelAnywhere(nil, "unknown-model") //nolint:staticcheck
+		if err == nil {
+			t.Error("Expected error for unknown model")
+		}
+	})
 }
