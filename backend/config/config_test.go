@@ -372,3 +372,62 @@ func TestResetTestConfig(t *testing.T) {
 		t.Error("Expected config to be reset")
 	}
 }
+
+func TestProvider_IsNativeOllama(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider Provider
+		expected bool
+	}{
+		{
+			name:     "non-ollama provider",
+			provider: Provider{Name: "openai", BaseURL: "https://api.openai.com/v1"},
+			expected: false,
+		},
+		{
+			name:     "ollama with /v1 (OpenAI-compatible mode)",
+			provider: Provider{Name: "ollama", BaseURL: "http://localhost:11434/v1"},
+			expected: false,
+		},
+		{
+			name:     "ollama without /v1 (native mode)",
+			provider: Provider{Name: "ollama", BaseURL: "http://localhost:11434"},
+			expected: true,
+		},
+		{
+			name:     "ollama native with trailing path",
+			provider: Provider{Name: "ollama", BaseURL: "http://localhost:11434/api"},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.provider.IsNativeOllama(); got != tt.expected {
+				t.Errorf("Provider.IsNativeOllama() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSetConfigPath(t *testing.T) {
+	// Save original
+	mu.Lock()
+	original := configPath
+	mu.Unlock()
+	defer func() {
+		mu.Lock()
+		configPath = original
+		mu.Unlock()
+	}()
+
+	SetConfigPath("/tmp/test-config.json")
+
+	mu.RLock()
+	got := configPath
+	mu.RUnlock()
+
+	if got != "/tmp/test-config.json" {
+		t.Errorf("Expected configPath '/tmp/test-config.json', got '%s'", got)
+	}
+}

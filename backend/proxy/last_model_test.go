@@ -77,6 +77,35 @@ func TestClearLastSuccessfulModel(t *testing.T) {
 	}
 }
 
+func TestClearLastSuccessfulModelIf(t *testing.T) {
+	t.Run("clears when matching", func(t *testing.T) {
+		SetLastSuccessfulModel("provider-a", "model-a", 50)
+		ClearLastSuccessfulModelIf("provider-a", "model-a")
+		p, m, l := GetLastSuccessfulModel()
+		if p != "" || m != "" || l != 0 {
+			t.Errorf("Expected cleared state, got provider=%s model=%s latency=%d", p, m, l)
+		}
+	})
+
+	t.Run("does not clear when provider mismatch", func(t *testing.T) {
+		SetLastSuccessfulModel("provider-a", "model-a", 50)
+		ClearLastSuccessfulModelIf("provider-b", "model-a")
+		p, m, l := GetLastSuccessfulModel()
+		if p != "provider-a" || m != "model-a" || l != 50 {
+			t.Errorf("Expected unchanged state, got provider=%s model=%s latency=%d", p, m, l)
+		}
+	})
+
+	t.Run("does not clear when model mismatch", func(t *testing.T) {
+		SetLastSuccessfulModel("provider-a", "model-a", 50)
+		ClearLastSuccessfulModelIf("provider-a", "model-b")
+		p, m, l := GetLastSuccessfulModel()
+		if p != "provider-a" || m != "model-a" || l != 50 {
+			t.Errorf("Expected unchanged state, got provider=%s model=%s latency=%d", p, m, l)
+		}
+	})
+}
+
 func TestGetAllCandidatesWithLastModel(t *testing.T) {
 	// Clear last model first
 	ClearLastSuccessfulModel()
