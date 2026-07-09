@@ -54,12 +54,12 @@ func Init(debug bool) {
 
 	// Start async writer
 	wg.Add(1)
-	go asyncWriter(logChan)
+	go asyncWriter()
 }
 
-func asyncWriter(ch chan logEntry) {
+func asyncWriter() {
 	defer wg.Done()
-	for entry := range ch {
+	for entry := range logChan {
 		// Store in ring buffer
 		GlobalRingBuffer.Add(entry.level, entry.msg, entry.fields)
 
@@ -72,7 +72,7 @@ func asyncWriter(ch chan logEntry) {
 }
 
 // Shutdown gracefully stops the logger, flushing remaining entries.
-// It is safe to call Shutdown multiple times.
+// It is idempotent: repeated calls are safe no-ops.
 func Shutdown() {
 	mu.Lock()
 	if !initialized {
@@ -81,7 +81,6 @@ func Shutdown() {
 	}
 	initialized = false
 	ch := logChan
-	logChan = nil
 	mu.Unlock()
 	close(ch)
 	wg.Wait()
@@ -93,14 +92,17 @@ func send(level zerolog.Level, msg string, fields map[string]interface{}) {
 		mu.Unlock()
 		return
 	}
-	ch := logChan
-	mu.Unlock()
-
+	// The lock is held through the select intentionally: releasing it before the
+	// non-blocking send would allow Shutdown() to close logChan between the
+	// initialized check and the send, causing a "send on closed channel" panic.
+	// The select always takes the default branch when the channel is full, so
+	// holding the lock here never blocks other goroutines for more than O(1).
 	select {
-	case ch <- logEntry{level: level, msg: msg, fields: fields}:
+	case logChan <- logEntry{level: level, msg: msg, fields: fields}:
 	default:
 		// Channel full, drop to prevent blocking
 	}
+	mu.Unlock()
 }
 
 // Debug logs a debug message

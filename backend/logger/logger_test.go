@@ -44,6 +44,8 @@ func TestShutdown_Initialized(t *testing.T) {
 	resetLogger()
 	Init(false)
 	Shutdown()
+	// Second call must be a no-op (idempotent)
+	Shutdown()
 }
 
 func TestSend_NotInitialized(t *testing.T) {
@@ -53,23 +55,31 @@ func TestSend_NotInitialized(t *testing.T) {
 }
 
 func TestSend_ChannelFull(t *testing.T) {
-	resetLogger()
-
 	// Use a capacity-1 channel with no consumer to deterministically exercise
-	// the drop path in send without relying on asyncWriter not draining in time.
+	// the drop (default) branch in send without relying on asyncWriter timing.
+	ch := make(chan logEntry, 1)
 	mu.Lock()
-	logChan = make(chan logEntry, 1)
+	logChan = ch
 	initialized = true
 	mu.Unlock()
-	defer resetLogger()
+	defer func() {
+		mu.Lock()
+		initialized = false
+		logChan = nil
+		mu.Unlock()
+	}()
 
 	// First send fills the channel.
-	send(zerolog.InfoLevel, "first", nil)
-	assert.Equal(t, 1, len(logChan))
+	send(zerolog.InfoLevel, "fill", nil)
+	if len(ch) != 1 {
+		t.Fatalf("expected channel length 1 after fill, got %d", len(ch))
+	}
 
-	// Second send must be dropped because the channel is at capacity.
-	send(zerolog.InfoLevel, "second", nil)
-	assert.Equal(t, 1, len(logChan), "excess send should be dropped")
+	// Second send must be dropped; length stays at capacity.
+	send(zerolog.InfoLevel, "drop", nil)
+	if len(ch) != 1 {
+		t.Errorf("expected channel length to remain 1 after drop, got %d", len(ch))
+	}
 }
 
 func TestEventLevels(t *testing.T) {
