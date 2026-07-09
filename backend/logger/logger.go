@@ -95,8 +95,8 @@ func send(level zerolog.Level, msg string, fields map[string]interface{}) {
 	// The lock is held through the select intentionally: releasing it before the
 	// non-blocking send would allow Shutdown() to close logChan between the
 	// initialized check and the send, causing a "send on closed channel" panic.
-	// The select always takes the default branch when the channel is full, so
-	// holding the lock here never blocks other goroutines for more than O(1).
+	// The select is non-blocking (default branch runs immediately when the channel
+	// is full), so the lock is held for O(1) time regardless of channel state.
 	select {
 	case logChan <- logEntry{level: level, msg: msg, fields: fields}:
 	default:
