@@ -16,6 +16,7 @@ var (
 	logChan     chan logEntry
 	wg          sync.WaitGroup
 	initialized bool
+	mu          sync.Mutex
 )
 
 type logEntry struct {
@@ -53,12 +54,12 @@ func Init(debug bool) {
 
 	// Start async writer
 	wg.Add(1)
-	go asyncWriter()
+	go asyncWriter(logChan)
 }
 
-func asyncWriter() {
+func asyncWriter(ch chan logEntry) {
 	defer wg.Done()
-	for entry := range logChan {
+	for entry := range ch {
 		// Store in ring buffer
 		GlobalRingBuffer.Add(entry.level, entry.msg, entry.fields)
 
@@ -70,21 +71,33 @@ func asyncWriter() {
 	}
 }
 
-// Shutdown gracefully stops the logger, flushing remaining entries
+// Shutdown gracefully stops the logger, flushing remaining entries.
+// It is safe to call Shutdown multiple times.
 func Shutdown() {
-	if initialized {
-		close(logChan)
-		wg.Wait()
+	mu.Lock()
+	if !initialized {
+		mu.Unlock()
+		return
 	}
+	initialized = false
+	ch := logChan
+	logChan = nil
+	mu.Unlock()
+	close(ch)
+	wg.Wait()
 }
 
 func send(level zerolog.Level, msg string, fields map[string]interface{}) {
+	mu.Lock()
 	if !initialized {
+		mu.Unlock()
 		return
 	}
+	ch := logChan
+	mu.Unlock()
 
 	select {
-	case logChan <- logEntry{level: level, msg: msg, fields: fields}:
+	case ch <- logEntry{level: level, msg: msg, fields: fields}:
 	default:
 		// Channel full, drop to prevent blocking
 	}

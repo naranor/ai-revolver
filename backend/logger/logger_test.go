@@ -12,10 +12,7 @@ import (
 
 // resetLogger tears down any running logger state so tests are isolated.
 func resetLogger() {
-	if initialized {
-		Shutdown()
-		initialized = false
-	}
+	Shutdown()
 }
 
 func TestInit_NonDebug(t *testing.T) {
@@ -47,8 +44,6 @@ func TestShutdown_Initialized(t *testing.T) {
 	resetLogger()
 	Init(false)
 	Shutdown()
-	initialized = false // Shutdown closes logChan but does not reset this flag;
-	// resetting manually prevents resetLogger from closing an already-closed channel
 }
 
 func TestSend_NotInitialized(t *testing.T) {
@@ -59,13 +54,22 @@ func TestSend_NotInitialized(t *testing.T) {
 
 func TestSend_ChannelFull(t *testing.T) {
 	resetLogger()
-	Init(false)
+
+	// Use a capacity-1 channel with no consumer to deterministically exercise
+	// the drop path in send without relying on asyncWriter not draining in time.
+	mu.Lock()
+	logChan = make(chan logEntry, 1)
+	initialized = true
+	mu.Unlock()
 	defer resetLogger()
 
-	// Fill the channel; extra sends should be silently dropped
-	for i := 0; i < 1200; i++ {
-		send(zerolog.InfoLevel, "flood", nil)
-	}
+	// First send fills the channel.
+	send(zerolog.InfoLevel, "first", nil)
+	assert.Equal(t, 1, len(logChan))
+
+	// Second send must be dropped because the channel is at capacity.
+	send(zerolog.InfoLevel, "second", nil)
+	assert.Equal(t, 1, len(logChan), "excess send should be dropped")
 }
 
 func TestEventLevels(t *testing.T) {
@@ -167,5 +171,4 @@ func TestAsyncWriter_ProcessesEntries(t *testing.T) {
 
 	// Shutdown flushes remaining entries; if asyncWriter is broken this would hang.
 	Shutdown()
-	initialized = false
 }
