@@ -47,7 +47,8 @@ func TestShutdown_Initialized(t *testing.T) {
 	resetLogger()
 	Init(false)
 	Shutdown()
-	initialized = false // mark as not initialized after shutdown so resetLogger is safe
+	initialized = false // Shutdown closes logChan but does not reset this flag;
+	// resetting manually prevents resetLogger from closing an already-closed channel
 }
 
 func TestSend_NotInitialized(t *testing.T) {

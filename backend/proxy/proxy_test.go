@@ -597,7 +597,7 @@ func TestBuildRequestBody(t *testing.T) {
 		if payload["model"] != "llama3" {
 			t.Errorf("Expected model 'llama3', got %v", payload["model"])
 		}
-		// Ollama body has 'stream' not 'provider' header
+		// Ollama body uses a 'stream' field at root, distinguishing it from OpenAI-format bodies
 		if _, ok := payload["stream"]; !ok {
 			t.Error("Expected 'stream' field in ollama body")
 		}
