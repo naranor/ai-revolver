@@ -34,6 +34,7 @@ var builderPool = sync.Pool{
 }
 
 // tryFallbackStreamModel tries the fallback model with the lowest EWMA latency when stream candidates are blocked.
+// Unlike tryFallbackModel, it writes the streaming response directly to the provided ResponseWriter.
 func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) error {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
 	if fallbackProvider == "" || fallbackModel == "" {
@@ -270,7 +271,7 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 	var lastCode int
 	var totalLatency int64
 	var attemptCount int
-	var skippedBlocked int
+	var skippedCount int
 
 	for _, candidate := range candidates {
 		// Check if the overall request context was canceled
@@ -279,7 +280,7 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 		}
 
 		if shouldSkipProvider(cfg, candidate) {
-			skippedBlocked++
+			skippedCount++
 			continue
 		}
 
@@ -334,7 +335,7 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 		}
 	}
 
-	if attemptCount == 0 && skippedBlocked > 0 {
+	if attemptCount == 0 && skippedCount > 0 {
 		if result, err := tryFallbackModel(ctx, cfg, req); err == nil {
 			return result, 200, nil
 		}
@@ -540,7 +541,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	var lastErr error
 	var totalLatency int64
 	var attemptCount int
-	var skippedBlocked int
+	var skippedCount int
 
 	tw := &trackingResponseWriter{ResponseWriter: w}
 
@@ -551,7 +552,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		}
 
 		if shouldSkipProvider(cfg, candidate) {
-			skippedBlocked++
+			skippedCount++
 			continue
 		}
 
@@ -625,7 +626,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		}
 	}
 
-	if attemptCount == 0 && skippedBlocked > 0 {
+	if attemptCount == 0 && skippedCount > 0 {
 		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err != nil {
 			lastErr = err
 		} else {
@@ -633,11 +634,8 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		}
 	}
 
-	if lastErr == nil {
-		if attemptCount > 0 {
-			return formatAllProvidersFailedError(attemptCount, fmt.Errorf("no successful stream response"))
-		}
-		return formatAllProvidersFailedError(attemptCount, nil)
+	if attemptCount > 0 && lastErr == nil {
+		lastErr = fmt.Errorf("all stream attempts exhausted without a successful response")
 	}
 	return formatAllProvidersFailedError(attemptCount, lastErr)
 }
