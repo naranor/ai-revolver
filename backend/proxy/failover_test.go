@@ -193,6 +193,7 @@ func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
 		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
 		flusher.Flush()
 
+		// Add enough bytes above scanner buffer limit to trigger bufio.ErrTooLong deterministically.
 		largePayload := strings.Repeat("a", int(OpenAIStreamBufferSize)+1024)
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", largePayload)
 		flusher.Flush()

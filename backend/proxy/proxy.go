@@ -34,7 +34,7 @@ var builderPool = sync.Pool{
 }
 
 // tryFallbackStreamModel tries the fallback model with the lowest EWMA latency when stream candidates are blocked.
-// Unlike tryFallbackModel, it writes the streaming response directly to the provided ResponseWriter.
+// Unlike tryFallbackModel, it streams directly to the provided ResponseWriter.
 func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) error {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
 	if fallbackProvider == "" || fallbackModel == "" {
@@ -627,15 +627,11 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	}
 
 	if attemptCount == 0 && skippedCount > 0 {
-		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err != nil {
+		if err := tryFallbackStreamModel(ctx, cfg, req, tw.ResponseWriter); err != nil {
 			lastErr = err
 		} else {
 			return nil
 		}
-	}
-
-	if attemptCount > 0 && lastErr == nil {
-		lastErr = fmt.Errorf("all stream attempts exhausted without a successful response")
 	}
 	return formatAllProvidersFailedError(attemptCount, lastErr)
 }
