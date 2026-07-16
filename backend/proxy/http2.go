@@ -34,6 +34,7 @@ func InitHTTPClients(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout, con
 	httpTransport := &http.Transport{
 		DialContext:         dialer.DialContext,
 		TLSHandshakeTimeout: connectTimeout,
+		ResponseHeaderTimeout: respTimeout,
 		MaxIdleConns:        maxIdleConns,
 		MaxIdleConnsPerHost: maxIdleConnsPerHost,
 		IdleConnTimeout:     idleConnTimeout,

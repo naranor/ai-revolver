@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"fmt"
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 	"ai-proxy/config"
@@ -118,6 +121,92 @@ drain:
 		case <-StatusEvents:
 		default:
 			break drain
+		}
+
+		func TestStreamingAllProvidersSkippedReturnsError(t *testing.T) {
+			ResetTestState()
+
+			cfg := config.Config{
+				Providers: []config.Provider{
+					{
+						Name:         "fast",
+						BaseURL:      "http://example.invalid",
+						Priority:     1,
+						RateLimit:    1,
+						CurrentUsage: 1,
+						Enabled:      BoolPtr(true),
+						Models:       []config.Model{{Name: "model-a"}},
+					},
+					{
+						Name:         "slow",
+						BaseURL:      "http://example.invalid",
+						Priority:     2,
+						RateLimit:    1,
+						CurrentUsage: 1,
+						Enabled:      BoolPtr(true),
+						Models:       []config.Model{{Name: "model-b"}},
+					},
+				},
+				MaxRetries: 5,
+				AutoMode:   config.AutoMode{Enabled: true},
+			}
+			config.LoadTestConfig(cfg)
+
+			req := Request{Model: "auto", Stream: true}
+			rr := httptest.NewRecorder()
+
+			err := Stream(context.Background(), req, rr)
+			if err == nil {
+				t.Fatal("Expected stream error when all providers are skipped")
+			}
+		}
+
+		func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
+			ResetTestState()
+
+			streamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					return
+				}
+
+				_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+				flusher.Flush()
+
+				oversized := strings.Repeat("a", int(OpenAIStreamBufferSize)+1024)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", oversized)
+				flusher.Flush()
+			}))
+			defer streamSrv.Close()
+
+			cfg := config.Config{
+				Providers: []config.Provider{
+					{
+						Name:     "streaming",
+						BaseURL:  streamSrv.URL,
+						Priority: 1,
+						Enabled:  BoolPtr(true),
+						Models:   []config.Model{{Name: "model-a"}},
+					},
+				},
+				MaxRetries: 1,
+				AutoMode:   config.AutoMode{Enabled: true},
+			}
+			config.LoadTestConfig(cfg)
+
+			req := Request{Model: "auto", Stream: true}
+			rr := httptest.NewRecorder()
+
+			err := Stream(context.Background(), req, rr)
+			if err == nil {
+				t.Fatal("Expected stream error after oversized SSE chunk")
+			}
+
+			status, _ := GetModelStatus("streaming", "model-a")
+			if status != StatusBlockedTemp {
+				t.Fatalf("Expected model status %v after stream failure, got %v", StatusBlockedTemp, status)
+			}
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,45 @@ var builderPool = sync.Pool{
 	New: func() interface{} {
 		return new(strings.Builder)
 	},
+}
+
+// tryFallbackStreamModel tries the best fallback model when all stream candidates are blocked
+func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) error {
+	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
+	if fallbackProvider == "" || fallbackModel == "" {
+		logger.Warn().Msg("All stream models blocked, no fallback available")
+		return fmt.Errorf("no fallback available")
+	}
+
+	logger.Warn().
+		Str("provider", fallbackProvider).
+		Str("model", fallbackModel).
+		Int64("latency_ms", fallbackLatency).
+		Msg("All stream models blocked, using fallback")
+	db.LogError("proxy", "fallback_stream",
+		fmt.Sprintf("All stream models blocked, using fallback %s/%s with latency %dms",
+			fallbackProvider, fallbackModel, fallbackLatency))
+
+	for _, p := range cfg.Providers {
+		if p.Name != fallbackProvider {
+			continue
+		}
+
+		startTime := time.Now()
+		code, err := forwardStreamRequest(ctx, p, fallbackModel, req, w)
+		latency := time.Since(startTime).Milliseconds()
+
+		if err == nil {
+			RecordSuccess(p.Name, fallbackModel, latency)
+			onSuccess(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, latency, req)
+			return nil
+		}
+
+		onFailure(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, code, err, req)
+		return err
+	}
+
+	return fmt.Errorf("fallback provider not found")
 }
 
 // Request represents an incoming chat completion request
@@ -501,6 +541,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	var lastCode int
 	var totalLatency int64
 	var attemptCount int
+	var skippedBlocked int
 
 	tw := &trackingResponseWriter{ResponseWriter: w}
 
@@ -511,6 +552,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		}
 
 		if shouldSkipProvider(cfg, candidate) {
+			skippedBlocked++
 			continue
 		}
 
@@ -525,10 +567,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		attemptCount++
 		startTime := time.Now()
 
-		// Per-candidate timeout (15s) for the initial connection attempt
-		candidateCtx, cancel := context.WithTimeout(ctx, GetResponseTimeout())
-		code, err := forwardStreamRequest(candidateCtx, candidate.Provider, candidate.Model, req, tw)
-		cancel()
+		code, err := forwardStreamRequest(ctx, candidate.Provider, candidate.Model, req, tw)
 
 		// If the main context was canceled, return immediately
 		if ctx.Err() == context.Canceled {
@@ -568,15 +607,16 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 				Str("model", candidate.Model).
 				Err(err).
 				Msg("Stream failed after data was written to client, cannot retry")
+			onFailure(candidate, latency, attemptCount, code, err, req)
 			return err
 		}
 
 		// Log warning if it was a timeout
-		if candidateCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(err, context.DeadlineExceeded) {
 			logger.Warn().
 				Str("provider", candidate.Provider.Name).
 				Str("model", candidate.Model).
-				Msg("Stream connection timed out (15s), trying next candidate")
+				Msg("Stream attempt timed out, trying next candidate")
 		}
 
 		onFailure(candidate, latency, attemptCount, code, err, req)
@@ -587,8 +627,16 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 		}
 	}
 
+	if attemptCount == 0 && skippedBlocked > 0 {
+		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
 	if lastErr == nil {
-		return nil
+		return formatAllProvidersFailedError(attemptCount, nil)
 	}
 	_ = lastCode // Ensure it's used or remove if not needed, but spec implied logging/status usage
 	return formatAllProvidersFailedError(attemptCount, lastErr)
