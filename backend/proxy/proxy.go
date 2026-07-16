@@ -538,7 +538,6 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	req.Stream = true
 
 	var lastErr error
-	var lastCode int
 	var totalLatency int64
 	var attemptCount int
 	var skippedBlocked int
@@ -576,7 +575,6 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 
 		latency := time.Since(startTime).Milliseconds()
 		totalLatency += latency
-		lastCode = code
 
 		if err == nil {
 			RecordSuccess(candidate.Provider.Name, candidate.Model, latency)
@@ -628,17 +626,19 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	}
 
 	if attemptCount == 0 && skippedBlocked > 0 {
-		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err == nil {
-			return nil
-		} else {
+		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err != nil {
 			lastErr = err
+		} else {
+			return nil
 		}
 	}
 
 	if lastErr == nil {
+		if attemptCount > 0 {
+			return formatAllProvidersFailedError(attemptCount, fmt.Errorf("no successful stream response"))
+		}
 		return formatAllProvidersFailedError(attemptCount, nil)
 	}
-	_ = lastCode // Ensure it's used or remove if not needed, but spec implied logging/status usage
 	return formatAllProvidersFailedError(attemptCount, lastErr)
 }
 
