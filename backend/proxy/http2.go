@@ -32,13 +32,13 @@ func InitHTTPClients(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout, con
 	}
 
 	httpTransport := &http.Transport{
-		DialContext:         dialer.DialContext,
-		TLSHandshakeTimeout: connectTimeout,
+		DialContext:           dialer.DialContext,
+		TLSHandshakeTimeout:   connectTimeout,
 		ResponseHeaderTimeout: respTimeout,
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		IdleConnTimeout:     idleConnTimeout,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		ForceAttemptHTTP2:     true,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			MaxVersion:         tls.VersionTLS13,
