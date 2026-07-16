@@ -33,7 +33,7 @@ var builderPool = sync.Pool{
 	},
 }
 
-// tryFallbackStreamModel tries the best fallback model when all stream candidates are blocked
+// tryFallbackStreamModel tries the fallback model with the lowest EWMA latency when stream candidates are blocked.
 func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) error {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
 	if fallbackProvider == "" || fallbackModel == "" {
@@ -69,7 +69,7 @@ func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request,
 		return err
 	}
 
-	return fmt.Errorf("fallback provider not found")
+	return fmt.Errorf("fallback provider %s not found in configuration", fallbackProvider)
 }
 
 // Request represents an incoming chat completion request
@@ -403,7 +403,7 @@ func onFailure(candidate ProviderModelPair, latency int64, attemptCount int, cod
 	RecordFailure(candidate.Provider.Name, candidate.Model, code, err)
 }
 
-// tryFallbackModel tries the best fallback model when all are blocked
+// tryFallbackModel tries the fallback model with the lowest EWMA latency when all are blocked.
 func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Response, error) {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
 	if fallbackProvider == "" || fallbackModel == "" {
@@ -441,7 +441,7 @@ func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Res
 		}
 	}
 
-	return nil, fmt.Errorf("fallback provider not found")
+	return nil, fmt.Errorf("fallback provider %s not found in configuration", fallbackProvider)
 }
 
 // formatAllProvidersFailedError creates an appropriate error message

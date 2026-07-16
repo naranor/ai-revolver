@@ -193,8 +193,8 @@ func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
 		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
 		flusher.Flush()
 
-		oversized := strings.Repeat("a", int(OpenAIStreamBufferSize)+1024)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", oversized)
+		oversizedChunk := strings.Repeat("a", int(OpenAIStreamBufferSize)+1024)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", oversizedChunk)
 		flusher.Flush()
 	}))
 	defer streamSrv.Close()
