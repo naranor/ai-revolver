@@ -182,20 +182,16 @@ The configuration is stored in `data/config.json`. You can edit it manually or v
 <summary><strong>🤖 MCP Integration Example</strong></summary>
 
 ```bash
+# MCP exposes config/stats/ops tools; LLM traffic uses /api/v1/chat/completions
 curl -X POST http://localhost:8081/mcp \
   -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "chat_completion",
-      "arguments": {
-        "model": "auto",
-        "messages": [{"role": "user", "content": "Hello!"}],
-        "stream": true
-      }
+      "name": "read_stats",
+      "arguments": {}
     }
   }'
 ```

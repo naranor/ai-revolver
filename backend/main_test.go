@@ -667,8 +667,8 @@ func TestChatCompletionsHandler(t *testing.T) {
 
 	// Mock proxyStreamFunc
 	originalStream := proxyStreamFunc
-	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) error {
-		return nil
+	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
+		return false, nil
 	}
 	defer func() {
 		proxyStreamFunc = originalStream
@@ -736,8 +736,8 @@ func TestChatCompletionsHandler(t *testing.T) {
 	}
 
 	// Test stream error
-	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) error {
-		return errors.New("test error")
+	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
+		return false, errors.New("test error")
 	}
 	req, err = http.NewRequestWithContext(context.Background(), "POST", "/api/v1/chat/completions", nil)
 	if err != nil {
@@ -749,8 +749,8 @@ func TestChatCompletionsHandler(t *testing.T) {
 		t.Errorf("handler returned wrong status code for stream error: got %v want %v",
 			status, http.StatusOK)
 	}
-	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) error {
-		return nil
+	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
+		return false, nil
 	}
 
 	// Test proxy

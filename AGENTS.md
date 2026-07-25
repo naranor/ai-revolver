@@ -211,7 +211,8 @@ curl -X POST http://localhost:8081/api/v1/chat/completions \
 
 ### Streamable HTTP (MCP)
 
-The `/mcp` endpoint implements MCP Streamable HTTP transport for AI agents:
+The `/mcp` endpoint implements MCP Streamable HTTP transport for ops/config/stats tools.
+LLM chat completions go through `/api/v1/chat/completions` (not MCP).
 
 ```bash
 # List models with capabilities
@@ -223,21 +224,16 @@ curl -X POST http://localhost:8081/mcp \
     "method": "models/list"
   }'
 
-# Chat completion via MCP
+# Read masked config via tool
 curl -X POST http://localhost:8081/mcp \
   -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "chat_completion",
-      "arguments": {
-        "model": "auto",
-        "messages": [{"role": "user", "content": "Hello"}],
-        "stream": true
-      }
+      "name": "read_config",
+      "arguments": {}
     }
   }'
 ```
@@ -248,8 +244,8 @@ curl -X POST http://localhost:8081/mcp \
 |--------|-------------|
 | `initialize` | Initialize session, get server info |
 | `notifications/initialized` | Acknowledge initialization |
-| `tools/list` | List available tools |
-| `tools/call` | Call a tool (chat_completion) |
+| `tools/list` | List available ops/config tools |
+| `tools/call` | Call a tool (config, stats, probe, …) |
 | `models/list` | List models with capabilities |
 
 #### MCP Session Management

@@ -368,15 +368,17 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		if streamErr := proxyStreamFunc(ctx, *req, w); streamErr != nil {
+		upstreamDone, streamErr := proxyStreamFunc(ctx, *req, w)
+		if streamErr != nil {
 			logger.Error().Err(streamErr).Msg("Stream proxy failed")
 			// Send error as SSE event
 			errResp := map[string]interface{}{"error": streamErr.Error()}
 			errJSON, _ := json.Marshal(errResp)
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", errJSON)
+		} else if !upstreamDone {
+			// Only emit DONE when upstream did not already send it
+			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		}
-		// Always send DONE at the end
-		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}

@@ -110,7 +110,7 @@ func TestStreamOllamaResponse_Usage(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	
-	err = streamOllamaResponse(resp, w, &mockFlusher{})
+	_, err = streamOllamaResponse(resp, w, &mockFlusher{})
 	if err != nil {
 		t.Fatalf("streamOllamaResponse failed: %v", err)
 	}
