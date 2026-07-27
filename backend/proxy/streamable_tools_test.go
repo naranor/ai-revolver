@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,9 +37,7 @@ func TestStreamableHTTPHandler_Tools(t *testing.T) {
 	os.WriteFile(cfgPath, data, 0644)
 	config.LoadConfig(cfgPath)
 
-	handler := NewStreamableHTTPHandler(func(_ context.Context, _ Request, _ http.ResponseWriter, _ *http.Request) error {
-		return nil
-	})
+	handler := NewStreamableHTTPHandler()
 
 	t.Run("tools/list", func(t *testing.T) {
 		reqBody := JSONRPCRequest{
@@ -67,9 +64,46 @@ func TestStreamableHTTPHandler_Tools(t *testing.T) {
 		result := resp.Result.(map[string]interface{})
 		tools := result["tools"].([]interface{})
 
-		// Expected tools: chat_completion, update_config, test_provider, analyze_failure, read_config, read_stats, read_logs
-		if len(tools) != 24 {
-			t.Errorf("Expected 7 tools, got %d", len(tools))
+		// chat_completion removed; config/stats/ops tools remain
+		if len(tools) != 23 {
+			t.Errorf("Expected 23 tools, got %d", len(tools))
+		}
+		for _, raw := range tools {
+			tool := raw.(map[string]interface{})
+			if tool["name"] == "chat_completion" {
+				t.Fatal("chat_completion must not be listed")
+			}
+		}
+	})
+
+	t.Run("tools/call chat_completion rejected", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]interface{}{
+			"name": "chat_completion",
+			"arguments": map[string]interface{}{
+				"messages": []map[string]interface{}{
+					{"role": "user", "content": "hi"},
+				},
+			},
+		})
+		reqBody := JSONRPCRequest{
+			JSONRPC: "2.0",
+			ID:      99,
+			Method:  "tools/call",
+			Params:  params,
+		}
+		data, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBuffer(data))
+		w := httptest.NewRecorder()
+
+		session := handler.sessions.CreateSession("test")
+		req.Header.Set(HeaderMCPSessionID, session.ID)
+
+		handler.Handle(w, req)
+
+		var resp JSONRPCResponse
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Error == nil {
+			t.Fatal("Expected error for removed chat_completion tool")
 		}
 	})
 

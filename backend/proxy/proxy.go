@@ -26,6 +26,12 @@ var (
 	TraceMode              bool                    // Log all payloads and responses
 )
 
+// ErrEmptyCompletion means upstream returned HTTP 200 without substantive content:
+// no non-empty text, tool_calls, reasoning_content, refusal, or thinking/reasoning
+// blocks. Treated as a failed attempt for failover when the client has not yet
+// received any bytes.
+var ErrEmptyCompletion = errors.New("upstream returned empty completion")
+
 // Pool for strings.Builder to reduce allocations in GetContentString
 var builderPool = sync.Pool{
 	New: func() interface{} {
@@ -75,10 +81,12 @@ var KnownRequestFields = map[string]bool{
 
 // Message represents a single chat message
 type Message struct {
-	Content    interface{}     `json:"content"`
-	Role       string          `json:"role"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+	Content          interface{}     `json:"content"`
+	Role             string          `json:"role"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Refusal          string          `json:"refusal,omitempty"`
 }
 
 // GetContentString converts Message content to string
@@ -105,6 +113,83 @@ func (m *Message) GetContentString() string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// hasToolCalls reports whether raw tool_calls JSON carries at least one call.
+func hasToolCalls(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" || string(trimmed) == "[]" {
+		return false
+	}
+	return true
+}
+
+// messageLacksContent reports whether a message has neither text, tool_calls,
+// reasoning/refusal, nor thinking blocks.
+func messageLacksContent(m *Message) bool {
+	if m == nil {
+		return true
+	}
+	if hasToolCalls(m.ToolCalls) {
+		return false
+	}
+	if strings.TrimSpace(m.ReasoningContent) != "" {
+		return false
+	}
+	if strings.TrimSpace(m.Refusal) != "" {
+		return false
+	}
+	if strings.TrimSpace(m.GetContentString()) != "" {
+		return false
+	}
+	if contentArrayHasThinking(m.Content) {
+		return false
+	}
+	return true
+}
+
+// contentArrayHasThinking reports thinking/reasoning blocks in multimodal content.
+func contentArrayHasThinking(content interface{}) bool {
+	arr, ok := content.([]interface{})
+	if !ok {
+		return false
+	}
+	for _, block := range arr {
+		blockMap, ok := block.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		typ, _ := blockMap["type"].(string)
+		if typ == "thinking" || typ == "reasoning" {
+			if t, ok := blockMap["thinking"].(string); ok && strings.TrimSpace(t) != "" {
+				return true
+			}
+			if t, ok := blockMap["text"].(string); ok && strings.TrimSpace(t) != "" {
+				return true
+			}
+		}
+		if t, ok := blockMap["thinking"].(string); ok && strings.TrimSpace(t) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isEmptyCompletion reports whether a response has no usable completion in any choice.
+func isEmptyCompletion(resp *Response) bool {
+	if resp == nil || len(resp.Choices) == 0 {
+		return true
+	}
+	for i := range resp.Choices {
+		choice := &resp.Choices[i]
+		if choice.Delta != nil && !messageLacksContent(choice.Delta) {
+			return false
+		}
+		if !messageLacksContent(&choice.Message) {
+			return false
+		}
+	}
+	return true
 }
 
 // Usage represents token usage statistics
@@ -269,11 +354,15 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 		totalLatency += latency
 		lastCode = code
 
-		// Successful if no error and code is 200
+		// Successful if no error, code is 200, and completion is non-empty
 		if err == nil && code == 200 {
-			RecordSuccess(candidate.Provider.Name, candidate.Model, latency)
-			onSuccess(candidate, latency, attemptCount, totalLatency, req)
-			return result, code, nil
+			if isEmptyCompletion(result) {
+				err = ErrEmptyCompletion
+			} else {
+				RecordSuccess(candidate.Provider.Name, candidate.Model, latency)
+				onSuccess(candidate, latency, attemptCount, totalLatency, req)
+				return result, code, nil
+			}
 		}
 
 		// Non-200 with no error is still a failure for failover purposes
@@ -289,8 +378,19 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 				Msg("Provider timed out, trying next candidate")
 		}
 
-		onFailure(candidate, latency, attemptCount, code, err, req)
-		lastErr = err
+		// Empty completions failover without blocking the model.
+		if errors.Is(err, ErrEmptyCompletion) {
+			logger.Warn().
+				Str("provider", candidate.Provider.Name).
+				Str("model", candidate.Model).
+				Err(err).
+				Msg("Empty completion, trying next candidate")
+			onEmptyCompletion(candidate.Provider.Name, candidate.Model, latency, code, err, req)
+			lastErr = err
+		} else {
+			onFailure(candidate, latency, attemptCount, code, err, req)
+			lastErr = err
+		}
 
 		if req.Probe {
 			break
@@ -366,6 +466,15 @@ func onFailure(candidate ProviderModelPair, latency int64, attemptCount int, cod
 	RecordFailure(candidate.Provider.Name, candidate.Model, code, err)
 }
 
+// onEmptyCompletion logs an empty-completion attempt for stats/observability without
+// recording a failure or blocking the model, since an empty 200 is usually transient
+// upstream flakiness rather than a real fault.
+func onEmptyCompletion(providerName, model string, latency int64, code int, err error, req Request) {
+	db.LogRequest(providerName, model, code, int(latency), req.IsWarmup)
+	db.LogError(providerName, "empty_completion",
+		fmt.Sprintf("Model %s/%s returned empty completion (code %d): %v", providerName, model, code, err))
+}
+
 // tryFallbackModel tries the fallback model with the lowest EWMA latency when all are blocked.
 func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Response, error) {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
@@ -390,6 +499,15 @@ func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Res
 			cancel()
 
 			if err == nil {
+				if isEmptyCompletion(result) {
+					logger.Error().
+						Str("provider", fallbackProvider).
+						Str("model", fallbackModel).
+						Err(ErrEmptyCompletion).
+						Msg("Fallback also failed")
+					onEmptyCompletion(fallbackProvider, fallbackModel, latency, code, ErrEmptyCompletion, req)
+					return nil, ErrEmptyCompletion
+				}
 				RecordSuccess(ProviderModelPair{Provider: p, Model: fallbackModel}.Provider.Name, fallbackModel, latency)
 				onSuccess(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, latency, req)
 				return result, nil
@@ -410,11 +528,12 @@ func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Res
 // tryFallbackStreamModel tries the fallback model with the lowest EWMA latency when stream candidates were skipped.
 // This covers blocked/rate-limited candidates where no regular stream attempt was executed.
 // Unlike tryFallbackModel, it streams directly to the provided ResponseWriter.
-func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) error {
+// Returns whether upstream already emitted [DONE].
+func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request, w http.ResponseWriter) (upstreamDone bool, err error) {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
 	if fallbackProvider == "" || fallbackModel == "" {
 		logger.Warn().Msg("All stream models blocked, no fallback available")
-		return fmt.Errorf("no fallback available")
+		return false, fmt.Errorf("no fallback available")
 	}
 
 	logger.Warn().
@@ -432,20 +551,30 @@ func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request,
 		}
 
 		startTime := time.Now()
-		code, err := forwardStreamRequest(ctx, p, fallbackModel, req, w)
+		code, upstreamDone, err := forwardStreamRequest(ctx, p, fallbackModel, req, w)
 		latency := time.Since(startTime).Milliseconds()
 
 		if err == nil {
 			RecordSuccess(p.Name, fallbackModel, latency)
 			onSuccess(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, latency, req)
-			return nil
+			return upstreamDone, nil
+		}
+
+		if errors.Is(err, ErrEmptyCompletion) {
+			logger.Warn().
+				Str("provider", fallbackProvider).
+				Str("model", fallbackModel).
+				Err(err).
+				Msg("Fallback stream returned empty completion")
+			onEmptyCompletion(p.Name, fallbackModel, latency, code, err, req)
+			return false, err
 		}
 
 		onFailure(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, code, err, req)
-		return err
+		return false, err
 	}
 
-	return fmt.Errorf("fallback provider %s not found in configuration", fallbackProvider)
+	return false, fmt.Errorf("fallback provider %s not found in configuration", fallbackProvider)
 }
 
 // formatAllProvidersFailedError creates an appropriate error message
@@ -522,8 +651,9 @@ func (w *trackingResponseWriter) Written() bool {
 	return w.written
 }
 
-// Stream handles streaming chat completion requests
-func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
+// Stream handles streaming chat completion requests.
+// upstreamDone is true when the successful upstream stream already emitted data: [DONE].
+func Stream(ctx context.Context, req Request, w http.ResponseWriter) (upstreamDone bool, err error) {
 
 	if TraceMode {
 		logger.Info().
@@ -536,7 +666,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	candidates := getCandidates(cfg, req.Model, req.Provider)
 
 	if len(candidates) == 0 {
-		return fmt.Errorf("no providers available")
+		return false, fmt.Errorf("no providers available")
 	}
 
 	req.Stream = true
@@ -551,7 +681,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	for _, candidate := range candidates {
 		// Check if the overall request context was canceled
 		if ctx.Err() == context.Canceled {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 
 		if shouldSkipProvider(cfg, candidate) {
@@ -572,11 +702,11 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 
 		// No per-attempt full-request timeout: ResponseHeaderTimeout covers hung connects,
 		// while the open stream body follows the parent ctx (client disconnect).
-		code, err := forwardStreamRequest(ctx, candidate.Provider, candidate.Model, req, tw)
+		code, done, err := forwardStreamRequest(ctx, candidate.Provider, candidate.Model, req, tw)
 
 		// If the main context was canceled, return immediately
 		if ctx.Err() == context.Canceled {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 
 		latency := time.Since(startTime).Milliseconds()
@@ -601,7 +731,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 				Msg("Stream completed successfully")
 
 			db.LogRequest(candidate.Provider.Name, candidate.Model, 200, int(latency), req.IsWarmup)
-			return nil
+			return done, nil
 		}
 
 		// If data was already written to the client, we CANNOT failover
@@ -612,7 +742,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 				Err(err).
 				Msg("Stream failed after data was written to client, cannot retry")
 			onFailure(candidate, latency, attemptCount, code, err, req)
-			return err
+			return false, err
 		}
 
 		// Log warning if it was a timeout
@@ -623,8 +753,18 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 				Msg("Stream attempt timed out, trying next candidate")
 		}
 
-		onFailure(candidate, latency, attemptCount, code, err, req)
-		lastErr = err
+		if errors.Is(err, ErrEmptyCompletion) {
+			logger.Warn().
+				Str("provider", candidate.Provider.Name).
+				Str("model", candidate.Model).
+				Err(err).
+				Msg("Empty stream completion, trying next candidate")
+			onEmptyCompletion(candidate.Provider.Name, candidate.Model, latency, code, err, req)
+			lastErr = err
+		} else {
+			onFailure(candidate, latency, attemptCount, code, err, req)
+			lastErr = err
+		}
 
 		if req.Probe {
 			break
@@ -632,13 +772,14 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) error {
 	}
 
 	if attemptCount == 0 && skippedCount > 0 {
-		if err := tryFallbackStreamModel(ctx, cfg, req, tw); err != nil {
+		done, err := tryFallbackStreamModel(ctx, cfg, req, tw)
+		if err != nil {
 			lastErr = err
 		} else {
-			return nil
+			return done, nil
 		}
 	}
-	return formatAllProvidersFailedError(attemptCount, lastErr)
+	return false, formatAllProvidersFailedError(attemptCount, lastErr)
 }
 
 // forwardRequest forwards a request to a provider and returns status code
@@ -701,14 +842,14 @@ func forwardRequest(ctx context.Context, provider config.Provider, model string,
 	return respObj, resp.StatusCode, decodeErr
 }
 
-// forwardStreamRequest forwards a streaming request and returns status code
-func forwardStreamRequest(ctx context.Context, provider config.Provider, model string, req Request, w http.ResponseWriter) (int, error) {
+// forwardStreamRequest forwards a streaming request and returns status code plus whether upstream emitted [DONE].
+func forwardStreamRequest(ctx context.Context, provider config.Provider, model string, req Request, w http.ResponseWriter) (int, bool, error) {
 	startTime := time.Now()
 	endpoint := buildEndpoint(provider, "/chat/completions")
 	body, err := buildRequestBody(provider, model, req)
 	if err != nil {
 		logger.Error().Err(err).Str("provider", provider.Name).Msg("Failed to build stream request body")
-		return 0, err
+		return 0, false, err
 	}
 
 	if TraceMode {
@@ -723,7 +864,7 @@ func forwardStreamRequest(ctx context.Context, provider config.Provider, model s
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		logger.Error().Err(err).Str("provider", provider.Name).Str("endpoint", endpoint).Msg("Failed to create stream HTTP request")
-		return 0, err
+		return 0, false, err
 	}
 
 	setStreamRequestHeaders(httpReq, provider)
@@ -738,7 +879,7 @@ func forwardStreamRequest(ctx context.Context, provider config.Provider, model s
 		db.LogError(provider.Name, "http_error", err.Error())
 		latency := time.Since(startTime).Milliseconds()
 		GlobalMetricsStore.ReportRequest(provider.Name, latency, err)
-		return 0, err
+		return 0, false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -761,13 +902,13 @@ func forwardStreamRequest(ctx context.Context, provider config.Provider, model s
 		err = fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
 		latency := time.Since(startTime).Milliseconds()
 		GlobalMetricsStore.ReportRequest(provider.Name, latency, err)
-		return resp.StatusCode, err
+		return resp.StatusCode, false, err
 	}
 
-	err = streamResponse(provider, resp, w)
+	upstreamDone, err := streamResponse(provider, resp, w)
 	latency := time.Since(startTime).Milliseconds()
 	GlobalMetricsStore.ReportRequest(provider.Name, latency, err)
-	return resp.StatusCode, err
+	return resp.StatusCode, upstreamDone, err
 }
 
 // buildEndpoint builds the endpoint URL for a provider
@@ -1020,11 +1161,12 @@ func decodeOllamaResponse(body io.Reader) (*Response, error) {
 	}, nil
 }
 
-// streamResponse streams the response to the client
-func streamResponse(provider config.Provider, resp *http.Response, w http.ResponseWriter) error {
+// streamResponse streams the response to the client.
+// upstreamDone is true when data: [DONE] was written from upstream.
+func streamResponse(provider config.Provider, resp *http.Response, w http.ResponseWriter) (bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return fmt.Errorf("streaming not supported")
+		return false, fmt.Errorf("streaming not supported")
 	}
 
 	if provider.IsNativeOllama() {
@@ -1034,10 +1176,88 @@ func streamResponse(provider config.Provider, resp *http.Response, w http.Respon
 	return streamOpenAIResponse(resp, w, flusher)
 }
 
-// streamOllamaResponse streams an Ollama NDJSON response as SSE
-func streamOllamaResponse(resp *http.Response, w http.ResponseWriter, flusher http.Flusher) error {
+// substantiveSSEGate buffers non-substantive SSE preamble until the first usable chunk,
+// enabling empty-completion detection and failover before any client write.
+type substantiveSSEGate struct {
+	w          http.ResponseWriter
+	flusher    http.Flusher
+	preamble   []string
+	sawContent bool
+	sawDone    bool
+}
+
+func newSubstantiveSSEGate(w http.ResponseWriter, flusher http.Flusher) *substantiveSSEGate {
+	return &substantiveSSEGate{w: w, flusher: flusher}
+}
+
+func (g *substantiveSSEGate) SawDone() bool {
+	return g.sawDone
+}
+
+func (g *substantiveSSEGate) writeLine(line string) error {
+	if _, err := g.w.Write([]byte(line + "\n")); err != nil {
+		// Client disconnected - treat as normal completion of the write path.
+		return nil
+	}
+	if len(line) == 0 || (len(line) >= 5 && line[:5] == "data:") {
+		g.flusher.Flush()
+	}
+	return nil
+}
+
+func (g *substantiveSSEGate) isDoneLine(line string) bool {
+	if !strings.HasPrefix(line, "data:") {
+		return false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	return payload == "[DONE]"
+}
+
+// FeedLine accepts one SSE line (without trailing newline semantics beyond scanner.Text).
+func (g *substantiveSSEGate) FeedLine(line string) error {
+	if g.isDoneLine(line) {
+		g.sawDone = true
+		if !g.sawContent {
+			// Hold DONE until we know the stream had content; Finish handles empty.
+			return nil
+		}
+		return g.writeLine(line)
+	}
+
+	if g.sawContent {
+		return g.writeLine(line)
+	}
+
+	if sseLineHasSubstantiveContent(line) {
+		for _, buffered := range g.preamble {
+			if err := g.writeLine(buffered); err != nil {
+				return err
+			}
+		}
+		g.preamble = nil
+		g.sawContent = true
+		return g.writeLine(line)
+	}
+
+	// Buffer role-only / empty deltas and non-data preamble lines.
+	g.preamble = append(g.preamble, line)
+	return nil
+}
+
+// Finish returns ErrEmptyCompletion when no substantive content was seen.
+// Once content has been seen, FeedLine writes DONE immediately as it arrives,
+// so there is nothing left to flush here.
+func (g *substantiveSSEGate) Finish() error {
+	if !g.sawContent {
+		return ErrEmptyCompletion
+	}
+	return nil
+}
+
+// streamOllamaResponse streams an Ollama NDJSON response as SSE via the substantive gate.
+func streamOllamaResponse(resp *http.Response, w http.ResponseWriter, flusher http.Flusher) (bool, error) {
+	gate := newSubstantiveSSEGate(w, flusher)
 	scanner := bufio.NewScanner(resp.Body)
-	// Use configurable buffer size
 	scanner.Buffer(make([]byte, OllamaStreamBufferSize), int(OllamaStreamBufferSize))
 
 	for scanner.Scan() {
@@ -1051,7 +1271,6 @@ func streamOllamaResponse(resp *http.Response, w http.ResponseWriter, flusher ht
 		}
 
 		var chunk OllamaResponse
-
 		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
 			logger.Debug().Err(err).Str("line", line).Msg("Failed to parse Ollama chunk")
 			continue
@@ -1084,97 +1303,150 @@ func streamOllamaResponse(resp *http.Response, w http.ResponseWriter, flusher ht
 		}
 
 		chunkJSON, _ := json.Marshal(sseChunk)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
-		flusher.Flush()
+		if err := gate.FeedLine("data: " + string(chunkJSON)); err != nil {
+			return gate.SawDone(), err
+		}
+		// Blank line completes the SSE event
+		if err := gate.FeedLine(""); err != nil {
+			return gate.SawDone(), err
+		}
 
 		if chunk.Done {
-			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
+			if err := gate.FeedLine("data: [DONE]"); err != nil {
+				return gate.SawDone(), err
+			}
+			if err := gate.FeedLine(""); err != nil {
+				return gate.SawDone(), err
+			}
 			break
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return gate.SawDone(), err
+	}
+	if err := gate.Finish(); err != nil {
+		return false, err
+	}
+	return gate.SawDone(), nil
 }
 
-// streamOpenAIResponse streams a standard SSE response
-func streamOpenAIResponse(resp *http.Response, w http.ResponseWriter, flusher http.Flusher) error {
-	// Check if response is actually SSE or regular JSON
+// streamOpenAIResponse streams a standard SSE response via the substantive gate.
+func streamOpenAIResponse(resp *http.Response, w http.ResponseWriter, flusher http.Flusher) (bool, error) {
+	gate := newSubstantiveSSEGate(w, flusher)
 	contentType := resp.Header.Get("Content-Type")
 
-	if contentType == "application/json" || contentType == "application/json; charset=utf-8" {
-		// Provider returned JSON instead of SSE - handle as single response
+	if strings.HasPrefix(strings.TrimSpace(contentType), "application/json") {
 		var result Response
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return err
+			return false, err
 		}
 
-		// Convert to SSE format and send
-		if len(result.Choices) > 0 {
-			msg := result.Choices[0].Message
-			delta := map[string]interface{}{
-				"content": msg.GetContentString(),
-			}
-
-			if msg.ToolCalls != nil {
-				delta["tool_calls"] = msg.ToolCalls
-			}
-			if msg.ToolCallID != "" {
-				delta["tool_call_id"] = msg.ToolCallID
-			}
-
-			chunk := map[string]interface{}{
-				"choices": []map[string]interface{}{
-					{"delta": delta},
-				},
-			}
-			chunkJSON, _ := json.Marshal(chunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
-			flusher.Flush()
+		if isEmptyCompletion(&result) {
+			return false, ErrEmptyCompletion
 		}
 
-		return nil
+		// Pick first substantive choice for the SSE conversion.
+		var msg Message
+		for i := range result.Choices {
+			if !messageLacksContent(&result.Choices[i].Message) {
+				msg = result.Choices[i].Message
+				break
+			}
+			if result.Choices[i].Delta != nil && !messageLacksContent(result.Choices[i].Delta) {
+				msg = *result.Choices[i].Delta
+				break
+			}
+		}
+
+		delta := map[string]interface{}{}
+		if strings.TrimSpace(msg.GetContentString()) != "" {
+			delta["content"] = msg.GetContentString()
+		}
+		if strings.TrimSpace(msg.ReasoningContent) != "" {
+			delta["reasoning_content"] = msg.ReasoningContent
+		}
+		if strings.TrimSpace(msg.Refusal) != "" {
+			delta["refusal"] = msg.Refusal
+		}
+		if msg.ToolCalls != nil {
+			delta["tool_calls"] = msg.ToolCalls
+		}
+		if msg.ToolCallID != "" {
+			delta["tool_call_id"] = msg.ToolCallID
+		}
+		if msg.Content != nil && contentArrayHasThinking(msg.Content) {
+			delta["content"] = msg.Content
+		}
+
+		chunk := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"delta": delta},
+			},
+		}
+		chunkJSON, _ := json.Marshal(chunk)
+		if err := gate.FeedLine("data: " + string(chunkJSON)); err != nil {
+			return gate.SawDone(), err
+		}
+		if err := gate.FeedLine(""); err != nil {
+			return gate.SawDone(), err
+		}
+		if err := gate.Finish(); err != nil {
+			return false, err
+		}
+		return gate.SawDone(), nil
 	}
 
-	// Handle as SSE stream - use efficient line-by-line copying
 	scanner := bufio.NewScanner(resp.Body)
-	// Use configurable buffer size
 	scanner.Buffer(make([]byte, OpenAIStreamBufferSize), int(OpenAIStreamBufferSize))
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if _, err := w.Write([]byte(line + "\n")); err != nil {
-			// Client disconnected - this is normal, don't log as error
-			return nil
-		}
-		// Only flush on SSE data lines (lines starting with "data:") or empty lines
-		if len(line) == 0 || len(line) >= 5 && line[:5] == "data:" {
-			flusher.Flush()
+		if err := gate.FeedLine(scanner.Text()); err != nil {
+			return gate.SawDone(), err
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return gate.SawDone(), err
+	}
+	if err := gate.Finish(); err != nil {
+		return false, err
+	}
+	return gate.SawDone(), nil
 }
 
-// getProviderAndModel finds the provider and model for a request
-func getProviderAndModel(ctx context.Context, req Request) (*config.Provider, string, error) {
-	cfg := config.GetConfig()
+// sseLineHasSubstantiveContent reports whether an SSE line carries usable delta/message content.
+func sseLineHasSubstantiveContent(line string) bool {
+	if !strings.HasPrefix(line, "data:") {
+		return false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return false
+	}
 
-	if req.Model == "auto" {
-		candidates := getAllCandidates(cfg)
-		if len(candidates) == 0 {
-			return nil, "", fmt.Errorf("no providers available for auto mode")
+	var envelope struct {
+		Choices []struct {
+			Delta   *Message `json:"delta"`
+			Message *Message `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+		return false
+	}
+	for i := range envelope.Choices {
+		choice := envelope.Choices[i]
+		if choice.Delta != nil && !messageLacksContent(choice.Delta) {
+			return true
 		}
-		// Return the first candidate as it's already sorted by tier/priority
-		return &candidates[0].Provider, candidates[0].Model, nil
+		if choice.Message != nil && !messageLacksContent(choice.Message) {
+			return true
+		}
 	}
-
-	if req.Provider != "" {
-		return findModelInProvider(ctx, cfg, req.Provider, req.Model)
-	}
-
-	return findModelAnywhere(ctx, req.Model)
+	return false
 }
+
+// getProviderAndModel was removed with MCP chat_completion; findModel* helpers remain for selection tests.
 
 // findModelInProvider finds a model in a specific provider
 func findModelInProvider(_ context.Context, cfg config.Config, providerName, modelName string) (*config.Provider, string, error) {

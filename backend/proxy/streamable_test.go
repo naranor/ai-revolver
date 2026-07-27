@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,9 +31,7 @@ func TestStreamableHTTPHandler_Resources(t *testing.T) {
 		},
 	})
 
-	handler := NewStreamableHTTPHandler(func(_ context.Context, _ Request, _ http.ResponseWriter, _ *http.Request) error {
-		return nil
-	})
+	handler := NewStreamableHTTPHandler()
 
 	t.Run("resources/list", func(t *testing.T) {
 		reqBody := JSONRPCRequest{

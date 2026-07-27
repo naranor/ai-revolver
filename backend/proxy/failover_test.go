@@ -86,7 +86,7 @@ func TestStreamingPreWriteFailover(t *testing.T) {
 	req := Request{Model: "auto", Stream: true}
 	rr := httptest.NewRecorder()
 
-	err := Stream(context.Background(), req, rr)
+	_, err := Stream(context.Background(), req, rr)
 
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
@@ -174,7 +174,7 @@ func TestStreamingAllProvidersSkippedReturnsError(t *testing.T) {
 	req := Request{Model: "auto", Stream: true}
 	rr := httptest.NewRecorder()
 
-	err := Stream(context.Background(), req, rr)
+	_, err := Stream(context.Background(), req, rr)
 	if err == nil {
 		t.Fatal("Expected stream error when all providers are skipped")
 	}
@@ -208,7 +208,7 @@ func TestStreamingFallbackSuccess(t *testing.T) {
 	req := Request{Model: "auto", Stream: true}
 	rr := httptest.NewRecorder()
 
-	err := Stream(context.Background(), req, rr)
+	_, err := Stream(context.Background(), req, rr)
 	if err != nil {
 		t.Fatalf("Expected successful stream fallback, got error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
 	req := Request{Model: "auto", Stream: true}
 	rr := httptest.NewRecorder()
 
-	err := Stream(context.Background(), req, rr)
+	_, err := Stream(context.Background(), req, rr)
 	if err == nil {
 		t.Fatal("Expected stream error after oversized SSE chunk")
 	}
@@ -269,5 +269,402 @@ func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
 	status, _ := GetModelStatus("streaming", "model-a")
 	if status != StatusBlockedTemp {
 		t.Fatalf("Expected model status %v after stream failure, got %v", StatusBlockedTemp, status)
+	}
+}
+
+func TestStreamingEmptySSEFailovers(t *testing.T) {
+	ResetTestState()
+
+	var emptyHits, goodHits int
+	emptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		emptyHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Upstream "success" with no substantive content — only DONE.
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer emptySrv.Close()
+
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"from-medium\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer goodSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "fast", BaseURL: emptySrv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "medium", BaseURL: goodSrv.URL, Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	rr := httptest.NewRecorder()
+	_, err := Stream(context.Background(), Request{Model: "auto", Stream: true}, rr)
+	if err != nil {
+		t.Fatalf("Expected successful failover stream, got: %v", err)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "from-medium") {
+		t.Fatalf("Expected content from medium provider, got body: %q", body)
+	}
+	if emptyHits != 1 {
+		t.Errorf("Expected 1 empty upstream attempt, got %d", emptyHits)
+	}
+	if goodHits != 1 {
+		t.Errorf("Expected 1 good upstream attempt, got %d", goodHits)
+	}
+}
+
+func TestStreamingEmptyJSONChoicesFailovers(t *testing.T) {
+	ResetTestState()
+
+	var emptyHits, goodHits int
+	emptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		emptyHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer emptySrv.Close()
+
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"from-medium"}}]}`))
+	}))
+	defer goodSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "fast", BaseURL: emptySrv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "medium", BaseURL: goodSrv.URL, Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	rr := httptest.NewRecorder()
+	_, err := Stream(context.Background(), Request{Model: "auto", Stream: true}, rr)
+	if err != nil {
+		t.Fatalf("Expected successful failover stream, got: %v", err)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "from-medium") {
+		t.Fatalf("Expected content from medium provider, got body: %q", body)
+	}
+	if emptyHits != 1 {
+		t.Errorf("Expected 1 empty JSON attempt, got %d", emptyHits)
+	}
+	if goodHits != 1 {
+		t.Errorf("Expected 1 good attempt, got %d", goodHits)
+	}
+}
+
+func TestNonStreamEmptyContentFailovers(t *testing.T) {
+	ResetTestState()
+
+	var emptyHits, goodHits int
+	emptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		emptyHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`))
+	}))
+	defer emptySrv.Close()
+
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"from-medium"}}]}`))
+	}))
+	defer goodSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "fast", BaseURL: emptySrv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "medium", BaseURL: goodSrv.URL, Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	result, code, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err != nil {
+		t.Fatalf("Expected successful failover, got: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("Expected status 200, got %d", code)
+	}
+	if result == nil || len(result.Choices) == 0 || result.Choices[0].Message.GetContentString() != "from-medium" {
+		t.Fatalf("Expected content from medium, got %+v", result)
+	}
+	if emptyHits != 1 {
+		t.Errorf("Expected 1 empty attempt, got %d", emptyHits)
+	}
+	if goodHits != 1 {
+		t.Errorf("Expected 1 good attempt, got %d", goodHits)
+	}
+}
+
+func TestToolCallsOnlyNotEmpty(t *testing.T) {
+	ResetTestState()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"ping","arguments":"{}"}}]}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "tools", BaseURL: srv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "backup", BaseURL: "http://127.0.0.1:1", Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	result, code, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err != nil {
+		t.Fatalf("Expected tool_calls-only response to succeed, got: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("Expected status 200, got %d", code)
+	}
+	if result == nil || len(result.Choices) == 0 || result.Choices[0].Message.ToolCalls == nil {
+		t.Fatalf("Expected tool_calls in result, got %+v", result)
+	}
+	if hits != 1 {
+		t.Errorf("Expected single attempt (no failover), got %d", hits)
+	}
+}
+
+func TestStreamingRolePreambleBuffered(t *testing.T) {
+	ResetTestState()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers:  []config.Provider{{Name: "fast", BaseURL: srv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}}},
+		MaxRetries: 1,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	rr := httptest.NewRecorder()
+	done, err := Stream(context.Background(), Request{Model: "auto", Stream: true}, rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !done {
+		t.Fatal("expected upstreamDone=true when upstream sent [DONE]")
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"role":"assistant"`) {
+		t.Fatalf("expected buffered role preamble in body, got %q", body)
+	}
+	if !strings.Contains(body, "hello") {
+		t.Fatalf("expected content in body, got %q", body)
+	}
+	if strings.Count(body, "[DONE]") != 1 {
+		t.Fatalf("expected single [DONE], got %q", body)
+	}
+}
+
+func TestOllamaEmptyStreamFailovers(t *testing.T) {
+	ResetTestState()
+
+	var emptyHits, goodHits int
+	emptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		emptyHits++
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","content":""},"done":true}`+"\n")
+	}))
+	defer emptySrv.Close()
+
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"from-medium\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer goodSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			// Name "ollama" + no /v1 => native Ollama stream path
+			{Name: "ollama", BaseURL: emptySrv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "medium", BaseURL: goodSrv.URL, Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	rr := httptest.NewRecorder()
+	_, err := Stream(context.Background(), Request{Model: "auto", Stream: true}, rr)
+	if err != nil {
+		t.Fatalf("expected failover success, got %v", err)
+	}
+	if !strings.Contains(rr.Body.String(), "from-medium") {
+		t.Fatalf("expected medium content, got %q", rr.Body.String())
+	}
+	if emptyHits != 1 || goodHits != 1 {
+		t.Fatalf("expected 1 empty + 1 good hits, got empty=%d good=%d", emptyHits, goodHits)
+	}
+}
+
+func TestNonStreamReasoningContentNotEmpty(t *testing.T) {
+	ResetTestState()
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"thinking..."}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "fast", BaseURL: srv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "backup", BaseURL: "http://127.0.0.1:1", Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	result, _, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err != nil {
+		t.Fatalf("expected success: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected no failover, hits=%d", hits)
+	}
+	if result.Choices[0].Message.ReasoningContent == "" {
+		t.Fatal("expected reasoning_content preserved")
+	}
+}
+
+func TestNonStreamWhitespaceContentFailovers(t *testing.T) {
+	ResetTestState()
+	var emptyHits, goodHits int
+	emptySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		emptyHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"   \n"}}]}`))
+	}))
+	defer emptySrv.Close()
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer goodSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{Name: "fast", BaseURL: emptySrv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}},
+			{Name: "medium", BaseURL: goodSrv.URL, Priority: 2, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-b"}}},
+		},
+		MaxRetries: 5,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	result, _, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err != nil {
+		t.Fatalf("expected failover: %v", err)
+	}
+	if result.Choices[0].Message.GetContentString() != "ok" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if emptyHits != 1 || goodHits != 1 {
+		t.Fatalf("hits empty=%d good=%d", emptyHits, goodHits)
+	}
+}
+
+func TestNonStreamSecondChoiceSubstantive(t *testing.T) {
+	ResetTestState()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}},{"message":{"role":"assistant","content":"second"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers:  []config.Provider{{Name: "fast", BaseURL: srv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}}},
+		MaxRetries: 1,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	result, _, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err != nil {
+		t.Fatalf("expected success using choice[1]: %v", err)
+	}
+	if isEmptyCompletion(result) {
+		t.Fatal("expected non-empty completion via second choice")
+	}
+}
+
+func TestEmptyCompletionDoesNotBlockModel(t *testing.T) {
+	ResetTestState()
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Providers:  []config.Provider{{Name: "fast", BaseURL: srv.URL, Priority: 1, Enabled: BoolPtr(true), Models: []config.Model{{Name: "model-a"}}}},
+		MaxRetries: 1,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	_, _, err := Proxy(context.Background(), Request{Model: "auto"})
+	if err == nil {
+		t.Fatal("expected error when only empty provider")
+	}
+	status, _ := GetModelStatus("fast", "model-a")
+	if status == StatusBlockedTemp || status == StatusBlockedFatal {
+		t.Fatalf("empty completion must not block model, got %v", status)
+	}
+	if hits != 1 {
+		t.Fatalf("expected 1 hit, got %d", hits)
 	}
 }

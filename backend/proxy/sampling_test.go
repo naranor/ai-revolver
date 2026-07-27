@@ -150,7 +150,7 @@ func TestSamplingCooldown(t *testing.T) {
 	err := errors.New("test error")
 
 	// Create a dummy session to see if broadcast happens
-	mcpHandler = NewStreamableHTTPHandler(nil)
+	mcpHandler = NewStreamableHTTPHandler()
 	mcpHandler.sessions.CreateSession("1.0")
 
 	// First call

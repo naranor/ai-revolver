@@ -153,15 +153,13 @@ func generateSessionID() string {
 
 // StreamableHTTPHandler handles Streamable HTTP requests
 type StreamableHTTPHandler struct {
-	sessions     *SessionManager
-	proxyHandler func(ctx context.Context, req Request, w http.ResponseWriter, r *http.Request) error
+	sessions *SessionManager
 }
 
 // NewStreamableHTTPHandler creates a new handler
-func NewStreamableHTTPHandler(proxyHandler func(ctx context.Context, req Request, w http.ResponseWriter, r *http.Request) error) *StreamableHTTPHandler {
+func NewStreamableHTTPHandler() *StreamableHTTPHandler {
 	return &StreamableHTTPHandler{
-		sessions:     NewSessionManager(),
-		proxyHandler: proxyHandler,
+		sessions: NewSessionManager(),
 	}
 }
 
@@ -412,33 +410,6 @@ func (h *StreamableHTTPHandler) handleResourcesRead(_ context.Context, w http.Re
 
 func (h *StreamableHTTPHandler) handleToolsList(_ context.Context, w http.ResponseWriter, req JSONRPCRequest, _ *MCPSession) {
 	tools := []map[string]interface{}{
-		{
-			"name":        "chat_completion",
-			"description": "Send a chat completion request to an AI model",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"model": map[string]interface{}{
-						"type":        "string",
-						"description": "Model name (e.g., 'gpt-4', 'claude-3-opus')",
-					},
-					"messages": map[string]interface{}{
-						"type":        "array",
-						"description": "Array of messages",
-					},
-					"stream": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Enable streaming response",
-						"default":     false,
-					},
-					"provider": map[string]interface{}{
-						"type":        "string",
-						"description": "Specific provider to use (optional)",
-					},
-				},
-				"required": []string{"messages"},
-			},
-		},
 		{
 			"name":        "update_config",
 			"description": "Apply a JSON Patch to the server configuration. User confirmation is required before calling this.",
@@ -730,7 +701,7 @@ func (h *StreamableHTTPHandler) handleToolsList(_ context.Context, w http.Respon
 }
 
 //nolint:gocyclo
-func (h *StreamableHTTPHandler) handleToolsCall(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest, _ *MCPSession, r *http.Request) {
+func (h *StreamableHTTPHandler) handleToolsCall(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest, _ *MCPSession, _ *http.Request) {
 	var params struct {
 		Arguments map[string]interface{} `json:"arguments"`
 		Name      string                 `json:"name"`
@@ -741,8 +712,6 @@ func (h *StreamableHTTPHandler) handleToolsCall(ctx context.Context, w http.Resp
 	}
 
 	switch params.Name {
-	case "chat_completion":
-		h.handleChatCompletionTool(ctx, w, req, params.Arguments, r)
 	case "update_config":
 		h.handleUpdateConfigTool(ctx, w, req, params.Arguments)
 	case "test_provider":
@@ -900,118 +869,6 @@ func (h *StreamableHTTPHandler) handleReadLogsTool(_ context.Context, w http.Res
 		},
 		"isError": false,
 	})
-}
-
-func (h *StreamableHTTPHandler) handleChatCompletionTool(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest, args map[string]interface{}, r *http.Request) {
-	// Build proxy request from tool arguments
-	proxyReq := Request{
-		Provider: getStringParam(args, "provider"),
-	}
-
-	if model, ok := args["model"].(string); ok {
-		proxyReq.Model = model
-	} else {
-		proxyReq.Model = "auto"
-	}
-
-	if messages, ok := args["messages"].([]interface{}); ok {
-		proxyReq.Messages = convertMessages(messages)
-	}
-
-	if stream, ok := args["stream"].(bool); ok {
-		proxyReq.Stream = stream
-	}
-
-	// Handle streaming vs non-streaming
-	acceptHeader := r.Header.Get("Accept")
-	isStreaming := proxyReq.Stream || strings.Contains(acceptHeader, ContentTypeSSE)
-
-	if isStreaming {
-		w.Header().Set("Content-Type", ContentTypeSSE)
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			writeJSONRPCError(w, req.ID, -32603, "Internal error", "Streaming not supported")
-			return
-		}
-
-		// Write initial response as SSE
-		h.writeSSEEvent(w, flusher, SSEEvent{
-			Event: "message",
-			Data: map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      req.ID,
-				"result": map[string]interface{}{
-					"content": []map[string]interface{}{},
-					"isError": false,
-				},
-			},
-		})
-
-		// Execute proxy request
-		err := h.proxyHandler(ctx, proxyReq, w, r)
-		if err != nil {
-			h.writeSSEEvent(w, flusher, SSEEvent{
-				Event: "error",
-				Data: map[string]interface{}{
-					"jsonrpc": "2.0",
-					"id":      req.ID,
-					"error": map[string]interface{}{
-						"code":    -32603,
-						"message": err.Error(),
-					},
-				},
-			})
-		}
-
-		// End event
-		h.writeSSEEvent(w, flusher, SSEEvent{
-			Event: "end",
-			Data:  map[string]interface{}{},
-		})
-	} else {
-		// Non-streaming: collect response and return as JSON
-		proxyReq.Stream = false
-		result, _, err := Proxy(ctx, proxyReq)
-		if err != nil {
-			writeJSONRPCError(w, req.ID, -32603, "Internal error", err.Error())
-			return
-		}
-
-		// Convert to MCP tool result format
-		content := []map[string]interface{}{}
-		for _, choice := range result.Choices {
-			msg := choice.Message
-
-			// Handle tool calls if present
-			if msg.ToolCalls != nil {
-				var toolCalls []interface{}
-				if err := json.Unmarshal(msg.ToolCalls, &toolCalls); err == nil {
-					for _, tc := range toolCalls {
-						if toolCallMap, ok := tc.(map[string]interface{}); ok {
-							content = append(content, map[string]interface{}{
-								"type":      "tool_call",
-								"tool_call": toolCallMap,
-							})
-						}
-					}
-				}
-			} else {
-				// Handle text content
-				content = append(content, map[string]interface{}{
-					"type": "text",
-					"text": msg.GetContentString(),
-				})
-			}
-		}
-
-		writeJSONRPCResponse(w, req.ID, map[string]interface{}{
-			"content": content,
-			"isError": false,
-		})
-	}
 }
 
 func (h *StreamableHTTPHandler) handleUpdateConfigTool(_ context.Context, w http.ResponseWriter, req JSONRPCRequest, args map[string]interface{}) {
@@ -1181,35 +1038,6 @@ func getStringParam(m map[string]interface{}, key string) string {
 	return ""
 }
 
-func convertMessages(messages []interface{}) []Message {
-	var result []Message
-	for _, m := range messages {
-		if msgMap, ok := m.(map[string]interface{}); ok {
-			msg := Message{
-				Role:    getStringParam(msgMap, "role"),
-				Content: msgMap["content"],
-			}
-
-			// Handle tool calls if present
-			if toolCalls, ok := msgMap["tool_calls"]; ok {
-				if toolCallsJSON, err := json.Marshal(toolCalls); err == nil {
-					msg.ToolCalls = json.RawMessage(toolCallsJSON)
-				}
-			}
-
-			// Handle tool call ID if present
-			if toolCallID, ok := msgMap["tool_call_id"]; ok {
-				if str, ok := toolCallID.(string); ok {
-					msg.ToolCallID = str
-				}
-			}
-
-			result = append(result, msg)
-		}
-	}
-	return result
-}
-
 var (
 	mcpHandler     *StreamableHTTPHandler
 	mcpHandlerOnce sync.Once
@@ -1304,21 +1132,8 @@ func marshalParams(v interface{}) json.RawMessage {
 // HandleMCPEndpoint is the main handler for /mcp endpoint
 func HandleMCPEndpoint(w http.ResponseWriter, r *http.Request) {
 	mcpHandlerOnce.Do(func() {
-		mcpHandler = NewStreamableHTTPHandler(handleStreamProxyRequest)
+		mcpHandler = NewStreamableHTTPHandler()
 	})
 	mcpHandler.Handle(w, r)
-}
-
-// handleStreamProxyRequest handles streaming proxy requests for MCP
-func handleStreamProxyRequest(ctx context.Context, req Request, w http.ResponseWriter, _ *http.Request) error {
-	// Get provider and model
-	provider, model, err := getProviderAndModel(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	// Forward streaming request
-	_, err = forwardStreamRequest(ctx, *provider, model, req, w)
-	return err
 }
 
