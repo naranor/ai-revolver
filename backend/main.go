@@ -375,8 +375,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			errResp := map[string]interface{}{"error": streamErr.Error()}
 			errJSON, _ := json.Marshal(errResp)
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", errJSON)
-		} else if !upstreamDone {
-			// Only emit DONE when upstream did not already send it
+		}
+		// Only emit DONE when upstream did not already send it
+		if !upstreamDone {
 			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		}
 		if f, ok := w.(http.Flusher); ok {
