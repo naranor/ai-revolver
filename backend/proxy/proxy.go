@@ -26,9 +26,10 @@ var (
 	TraceMode              bool                    // Log all payloads and responses
 )
 
-// ErrEmptyCompletion means upstream returned HTTP 200 without substantive content
-// (no non-empty text and no tool_calls). Treated as a failed attempt for failover
-// when the client has not yet received any bytes.
+// ErrEmptyCompletion means upstream returned HTTP 200 without substantive content:
+// no non-empty text, tool_calls, reasoning_content, refusal, or thinking/reasoning
+// blocks. Treated as a failed attempt for failover when the client has not yet
+// received any bytes.
 var ErrEmptyCompletion = errors.New("upstream returned empty completion")
 
 // Pool for strings.Builder to reduce allocations in GetContentString
@@ -384,6 +385,7 @@ func tryProviders(ctx context.Context, cfg config.Config, candidates []ProviderM
 				Str("model", candidate.Model).
 				Err(err).
 				Msg("Empty completion, trying next candidate")
+			onEmptyCompletion(candidate.Provider.Name, candidate.Model, latency, code, err, req)
 			lastErr = err
 		} else {
 			onFailure(candidate, latency, attemptCount, code, err, req)
@@ -464,6 +466,15 @@ func onFailure(candidate ProviderModelPair, latency int64, attemptCount int, cod
 	RecordFailure(candidate.Provider.Name, candidate.Model, code, err)
 }
 
+// onEmptyCompletion logs an empty-completion attempt for stats/observability without
+// recording a failure or blocking the model, since an empty 200 is usually transient
+// upstream flakiness rather than a real fault.
+func onEmptyCompletion(providerName, model string, latency int64, code int, err error, req Request) {
+	db.LogRequest(providerName, model, code, int(latency), req.IsWarmup)
+	db.LogError(providerName, "empty_completion",
+		fmt.Sprintf("Model %s/%s returned empty completion (code %d): %v", providerName, model, code, err))
+}
+
 // tryFallbackModel tries the fallback model with the lowest EWMA latency when all are blocked.
 func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Response, error) {
 	fallbackProvider, fallbackModel, fallbackLatency := GetBestFallbackModel()
@@ -494,6 +505,7 @@ func tryFallbackModel(ctx context.Context, cfg config.Config, req Request) (*Res
 						Str("model", fallbackModel).
 						Err(ErrEmptyCompletion).
 						Msg("Fallback also failed")
+					onEmptyCompletion(fallbackProvider, fallbackModel, latency, code, ErrEmptyCompletion, req)
 					return nil, ErrEmptyCompletion
 				}
 				RecordSuccess(ProviderModelPair{Provider: p, Model: fallbackModel}.Provider.Name, fallbackModel, latency)
@@ -554,6 +566,7 @@ func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request,
 				Str("model", fallbackModel).
 				Err(err).
 				Msg("Fallback stream returned empty completion")
+			onEmptyCompletion(p.Name, fallbackModel, latency, code, err, req)
 			return false, err
 		}
 
@@ -746,6 +759,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) (upstreamDo
 				Str("model", candidate.Model).
 				Err(err).
 				Msg("Empty stream completion, trying next candidate")
+			onEmptyCompletion(candidate.Provider.Name, candidate.Model, latency, code, err, req)
 			lastErr = err
 		} else {
 			onFailure(candidate, latency, attemptCount, code, err, req)
@@ -1231,15 +1245,11 @@ func (g *substantiveSSEGate) FeedLine(line string) error {
 }
 
 // Finish returns ErrEmptyCompletion when no substantive content was seen.
-// If content was seen and upstream marked DONE but it was held, emit DONE now.
+// Once content has been seen, FeedLine writes DONE immediately as it arrives,
+// so there is nothing left to flush here.
 func (g *substantiveSSEGate) Finish() error {
 	if !g.sawContent {
 		return ErrEmptyCompletion
-	}
-	if g.sawDone {
-		// DONE may already have been written after content; if it was only flagged
-		// without write (shouldn't happen after sawContent), ensure it is present.
-		// After sawContent, FeedLine writes DONE immediately — nothing to do.
 	}
 	return nil
 }
