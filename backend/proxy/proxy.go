@@ -32,6 +32,12 @@ var (
 // received any bytes.
 var ErrEmptyCompletion = errors.New("upstream returned empty completion")
 
+// ErrClientWrite means writing to the downstream client failed (broken pipe, client
+// aborted the stream). The upstream provider answered fine, so this must never be
+// recorded as a provider failure: doing so would block a healthy model and shrink the
+// candidate pool for a reason unrelated to provider health.
+var ErrClientWrite = errors.New("client write failed")
+
 // Pool for strings.Builder to reduce allocations in GetContentString
 var builderPool = sync.Pool{
 	New: func() interface{} {
@@ -570,6 +576,16 @@ func tryFallbackStreamModel(ctx context.Context, cfg config.Config, req Request,
 			return false, err
 		}
 
+		// Client-side write failure says nothing about the fallback model's health.
+		if errors.Is(err, ErrClientWrite) {
+			logger.Warn().
+				Str("provider", fallbackProvider).
+				Str("model", fallbackModel).
+				Err(err).
+				Msg("Client write failed on fallback stream, not penalizing provider")
+			return false, err
+		}
+
 		onFailure(ProviderModelPair{Provider: p, Model: fallbackModel}, latency, 1, code, err, req)
 		return false, err
 	}
@@ -690,7 +706,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) (upstreamDo
 	var attemptCount int
 	var skippedCount int
 
-	tw := &TrackingResponseWriter{ResponseWriter: w}
+	tw := NewTrackingResponseWriter(w)
 
 	for _, candidate := range candidates {
 		// Check if the overall request context was canceled
@@ -746,6 +762,18 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) (upstreamDo
 
 			db.LogRequest(candidate.Provider.Name, candidate.Model, 200, int(latency), req.IsWarmup)
 			return done, nil
+		}
+
+		// The client went away mid-stream. The provider answered fine, so abort without
+		// recording a failure — otherwise an ordinary client cancel would block a
+		// healthy model. Checked before Written(), since a failed Write still sets it.
+		if errors.Is(err, ErrClientWrite) {
+			logger.Warn().
+				Str("provider", candidate.Provider.Name).
+				Str("model", candidate.Model).
+				Err(err).
+				Msg("Client write failed, aborting stream without penalizing provider")
+			return false, err
 		}
 
 		// If data was already written to the client, we CANNOT failover
@@ -1210,7 +1238,9 @@ func (g *substantiveSSEGate) SawDone() bool {
 
 func (g *substantiveSSEGate) writeLine(line string) error {
 	if _, err := g.w.Write([]byte(line + "\n")); err != nil {
-		return err
+		// Surface the failure so the caller stops pumping a dead stream, but tag it as
+		// a client-side error so Stream does not penalize the provider.
+		return fmt.Errorf("%w: %v", ErrClientWrite, err)
 	}
 	if len(line) == 0 || (len(line) >= 5 && line[:5] == "data:") {
 		g.flusher.Flush()

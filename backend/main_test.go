@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -749,6 +751,60 @@ func TestChatCompletionsHandler(t *testing.T) {
 		t.Errorf("handler returned wrong status code for stream error: got %v want %v",
 			status, http.StatusInternalServerError)
 	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("stream error content type: got %q want %q", ct, "application/json")
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("stream error body is not valid JSON: %v (body: %q)", err, rr.Body.String())
+	}
+	if errBody.Error != "test error" {
+		t.Errorf("stream error body: got %q want %q", errBody.Error, "test error")
+	}
+	// An SSE terminator here would let a client read the failure as a successful
+	// empty stream, which is exactly what this handler must not produce.
+	if strings.Contains(rr.Body.String(), "[DONE]") {
+		t.Errorf("stream error body must not contain an SSE terminator: %q", rr.Body.String())
+	}
+
+	// Test stream error after data was written → status stays 200, error arrives as SSE
+	proxyStreamFunc = func(_ context.Context, _ proxy.Request, w http.ResponseWriter) (bool, error) {
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		return false, errors.New("mid-stream failure")
+	}
+	req, err = http.NewRequestWithContext(context.Background(), "POST", "/api/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code for mid-stream error: got %v want %v",
+			status, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("mid-stream error content type: got %q want %q", ct, "text/event-stream")
+	}
+	if !strings.Contains(rr.Body.String(), "mid-stream failure") {
+		t.Errorf("mid-stream error not surfaced as SSE event: %q", rr.Body.String())
+	}
+
+	// Test client disconnect → handler stays silent, no 500 and no SSE terminator
+	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
+		return false, fmt.Errorf("%w: broken pipe", proxy.ErrClientWrite)
+	}
+	req, err = http.NewRequestWithContext(context.Background(), "POST", "/api/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Body.Len() != 0 {
+		t.Errorf("client disconnect should not write a body, got %q", rr.Body.String())
+	}
+
 	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
 		return false, nil
 	}

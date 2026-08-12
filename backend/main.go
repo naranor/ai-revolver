@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -367,6 +368,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		tw.SSEHeaders = true
 		upstreamDone, streamErr := proxyStreamFunc(ctx, *req, tw)
 		if streamErr != nil {
+			// The client is gone: nothing can be delivered and this is not a proxy fault.
+			if errors.Is(streamErr, proxy.ErrClientWrite) || errors.Is(streamErr, context.Canceled) {
+				logger.Debug().Err(streamErr).Msg("Client disconnected during stream")
+				return
+			}
 			logger.Error().Err(streamErr).Msg("Stream proxy failed")
 			if !tw.Written() {
 				// Nothing was committed to the client — return a proper JSON error.
