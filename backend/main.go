@@ -363,22 +363,28 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		Msg("Processing request")
 
 	if req.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		upstreamDone, streamErr := proxyStreamFunc(ctx, *req, w)
+		tw := proxy.NewTrackingResponseWriter(w)
+		tw.SSEHeaders = true
+		upstreamDone, streamErr := proxyStreamFunc(ctx, *req, tw)
 		if streamErr != nil {
 			logger.Error().Err(streamErr).Msg("Stream proxy failed")
-			// Send error as SSE event
+			if !tw.Written() {
+				// Nothing was committed to the client — return a proper JSON error.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				errResp := map[string]interface{}{"error": streamErr.Error()}
+				errJSON, _ := json.Marshal(errResp)
+				_, _ = w.Write(errJSON)
+				return
+			}
+			// Data already on the wire — send error as SSE event.
 			errResp := map[string]interface{}{"error": streamErr.Error()}
 			errJSON, _ := json.Marshal(errResp)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", errJSON)
+			_, _ = fmt.Fprintf(tw, "data: %s\n\n", errJSON)
 		}
 		// Only emit DONE when upstream did not already send it
 		if !upstreamDone {
-			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			_, _ = fmt.Fprintf(tw, "data: [DONE]\n\n")
 		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()

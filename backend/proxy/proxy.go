@@ -623,31 +623,45 @@ func forwardRequestWithLatency(ctx context.Context, provider config.Provider, mo
 	return result, latency, code, err
 }
 
-// trackingResponseWriter wraps http.ResponseWriter to track if any data was written
-type trackingResponseWriter struct {
+// TrackingResponseWriter wraps http.ResponseWriter to track if any data was written.
+// When used for SSE streaming, set SSEHeaders = true to have the SSE response headers
+// injected automatically on the first Write (before the status code is committed).
+type TrackingResponseWriter struct {
 	http.ResponseWriter
-	written bool
+	written    bool
+	SSEHeaders bool
 }
 
-func (w *trackingResponseWriter) WriteHeader(code int) {
+// NewTrackingResponseWriter creates a new TrackingResponseWriter
+func NewTrackingResponseWriter(w http.ResponseWriter) *TrackingResponseWriter {
+	return &TrackingResponseWriter{ResponseWriter: w}
+}
+
+func (w *TrackingResponseWriter) WriteHeader(code int) {
 	w.written = true
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func (w *trackingResponseWriter) Write(b []byte) (int, error) {
+func (w *TrackingResponseWriter) Write(b []byte) (int, error) {
 	if len(b) > 0 {
+		if !w.written && w.SSEHeaders {
+			w.ResponseWriter.Header().Set("Content-Type", "text/event-stream")
+			w.ResponseWriter.Header().Set("Cache-Control", "no-cache")
+			w.ResponseWriter.Header().Set("Connection", "keep-alive")
+			w.ResponseWriter.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.written = true
 	}
 	return w.ResponseWriter.Write(b)
 }
 
-func (w *trackingResponseWriter) Flush() {
+func (w *TrackingResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-func (w *trackingResponseWriter) Written() bool {
+func (w *TrackingResponseWriter) Written() bool {
 	return w.written
 }
 
@@ -676,7 +690,7 @@ func Stream(ctx context.Context, req Request, w http.ResponseWriter) (upstreamDo
 	var attemptCount int
 	var skippedCount int
 
-	tw := &trackingResponseWriter{ResponseWriter: w}
+	tw := &TrackingResponseWriter{ResponseWriter: w}
 
 	for _, candidate := range candidates {
 		// Check if the overall request context was canceled
@@ -1196,8 +1210,7 @@ func (g *substantiveSSEGate) SawDone() bool {
 
 func (g *substantiveSSEGate) writeLine(line string) error {
 	if _, err := g.w.Write([]byte(line + "\n")); err != nil {
-		// Client disconnected - treat as normal completion of the write path.
-		return nil
+		return err
 	}
 	if len(line) == 0 || (len(line) >= 5 && line[:5] == "data:") {
 		g.flusher.Flush()

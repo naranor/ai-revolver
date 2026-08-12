@@ -735,7 +735,7 @@ func TestChatCompletionsHandler(t *testing.T) {
 			status, http.StatusOK)
 	}
 
-	// Test stream error
+	// Test stream error (no data written → expect 500 with JSON error body)
 	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
 		return false, errors.New("test error")
 	}
@@ -745,9 +745,9 @@ func TestChatCompletionsHandler(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	if status := rr.Code; status != http.StatusOK {
+	if status := rr.Code; status != http.StatusInternalServerError {
 		t.Errorf("handler returned wrong status code for stream error: got %v want %v",
-			status, http.StatusOK)
+			status, http.StatusInternalServerError)
 	}
 	proxyStreamFunc = func(_ context.Context, _ proxy.Request, _ http.ResponseWriter) (bool, error) {
 		return false, nil
