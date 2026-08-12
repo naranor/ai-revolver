@@ -3,6 +3,7 @@ package proxy
 import (
 	"ai-proxy/config"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -269,6 +270,82 @@ func TestStreamingPostWriteFailureRecordsFailure(t *testing.T) {
 	status, _ := GetModelStatus("streaming", "model-a")
 	if status != StatusBlockedTemp {
 		t.Fatalf("Expected model status %v after stream failure, got %v", StatusBlockedTemp, status)
+	}
+}
+
+// failingResponseWriter fails every Write, simulating a client that hung up mid-stream.
+type failingResponseWriter struct {
+	header http.Header
+	writes int
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *failingResponseWriter) Write(b []byte) (int, error) {
+	w.writes++
+	return 0, fmt.Errorf("write tcp 127.0.0.1:8081->127.0.0.1:54321: write: broken pipe")
+}
+
+func (w *failingResponseWriter) WriteHeader(int) {}
+
+func (w *failingResponseWriter) Flush() {}
+
+// A client disconnect must not be charged to the provider: the upstream answered 200,
+// and RecordFailure would otherwise fall into its default branch and block a healthy
+// model for five minutes, shrinking the candidate pool for the next request.
+func TestStreamingClientWriteFailureDoesNotBlockModel(t *testing.T) {
+	ResetTestState()
+
+	streamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer streamSrv.Close()
+
+	cfg := config.Config{
+		Providers: []config.Provider{
+			{
+				Name:     "streaming",
+				BaseURL:  streamSrv.URL,
+				Priority: 1,
+				Enabled:  BoolPtr(true),
+				Models:   []config.Model{{Name: "model-a"}},
+			},
+		},
+		MaxRetries: 3,
+		AutoMode:   config.AutoMode{Enabled: true},
+	}
+	config.LoadTestConfig(cfg)
+
+	fw := &failingResponseWriter{}
+	_, err := Stream(context.Background(), Request{Model: "auto", Stream: true}, fw)
+
+	if err == nil {
+		t.Fatal("Expected an error when the client connection is broken")
+	}
+	if !errors.Is(err, ErrClientWrite) {
+		t.Fatalf("Expected error to match ErrClientWrite, got %v", err)
+	}
+	if fw.writes == 0 {
+		t.Fatal("Expected at least one attempted client write")
+	}
+
+	status, reason := GetModelStatus("streaming", "model-a")
+	if status != StatusActive {
+		t.Fatalf("Client disconnect must not block the model: got status %v (reason %v), want %v",
+			status, reason, StatusActive)
 	}
 }
 
