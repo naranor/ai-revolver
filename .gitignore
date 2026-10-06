@@ -56,3 +56,4 @@ ai-revolver-proxy.skill
 /.agents/
 /.gemini/
 /bkp/
+/.claude/

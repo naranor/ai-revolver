@@ -231,6 +231,7 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 			Parent:  nil,
 			Capabilities: map[string]interface{}{
 				"description": "Automatically selects the best available provider and model based on performance and availability.",
+				"reasoning":   true,
 			},
 		},
 	}
