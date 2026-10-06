@@ -976,52 +976,89 @@ func buildRequestBody(provider config.Provider, model string, req Request) ([]by
 		return nil, err
 	}
 
-	// Only unmarshal and adjust if the provider requires specific fixes
-	if provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI" {
-		var payload map[string]interface{}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, err
-		}
-
-		adjustProviderPayload(provider.Name, payload)
-
-		adjustedBody, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		return adjustedBody, nil
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
 	}
 
-	return body, nil
+	modelCfg, _ := findProviderModel(provider, model)
+	adjustReasoningEffort(provider.Name, modelCfg.Reasoning, payload)
+
+	if provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI" {
+		adjustProviderPayload(provider.Name, payload)
+	}
+
+	adjustedBody, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	return adjustedBody, nil
+}
+
+// findProviderModel returns the configured model entry for a provider.
+func findProviderModel(provider config.Provider, modelName string) (config.Model, bool) {
+	for _, m := range provider.Models {
+		if m.Name == modelName {
+			return m, true
+		}
+	}
+	return config.Model{}, false
+}
+
+// providersRejectingReasoningEffort always drop reasoning params even if model.Reasoning is true.
+var providersRejectingReasoningEffort = map[string]struct{}{
+	"groq":    {},
+	"mistral": {},
+	"ollama":  {},
+	"omni":    {},
+}
+
+// adjustReasoningEffort maps or strips reasoning_effort based on model.Reasoning
+// and the target provider's accepted wire format.
+func adjustReasoningEffort(providerName string, supportsReasoning bool, payload map[string]interface{}) {
+	effort, hasEffort := payload["reasoning_effort"]
+	_, hasReasoningObj := payload["reasoning"]
+	providerKey := strings.ToLower(providerName)
+
+	if _, reject := providersRejectingReasoningEffort[providerKey]; reject || !supportsReasoning {
+		delete(payload, "reasoning_effort")
+		delete(payload, "reasoning")
+		return
+	}
+	if !hasEffort {
+		return
+	}
+
+	switch providerKey {
+	case "openrouter", "kilocode", "kilo":
+		// OpenRouter / Kilo Gateway: native shape is reasoning.effort
+		delete(payload, "reasoning_effort")
+		if existing, ok := payload["reasoning"].(map[string]interface{}); ok {
+			existing["effort"] = effort
+			payload["reasoning"] = existing
+		} else {
+			payload["reasoning"] = map[string]interface{}{"effort": effort}
+		}
+	case "opencode":
+		// OpenCode Zen chat completions: top-level reasoning_effort
+		if hasReasoningObj {
+			delete(payload, "reasoning")
+		}
+	default:
+		// OpenAI-compatible default: keep reasoning_effort as-is
+	}
 }
 
 // adjustProviderPayload handles all provider-specific parameter adjustments
 func adjustProviderPayload(providerName string, payload map[string]interface{}) {
-	// 1. Groq specific reasoning_effort adjustment
-	if providerName == "groq" {
-		adjustGroqReasoningEffort(payload)
-	}
-
-	// 2. Common parameter filtering for non-OpenAI-native providers
 	filterCommonUnsupportedParams(providerName, payload)
 }
 
-// adjustGroqReasoningEffort ensures reasoning_effort is compatible with Groq
-func adjustGroqReasoningEffort(payload map[string]interface{}) {
-	// Some Groq models don't support reasoning_effort at all
-	delete(payload, "reasoning_effort")
-}
-
-// filterCommonUnsupportedParams removes parameters that cause 422/400 errors
-func filterCommonUnsupportedParams(providerName string, payload map[string]interface{}) {
-	// These fields are OpenAI-specific and often cause failures elsewhere
+// filterCommonUnsupportedParams removes parameters that cause 422/400 errors.
+// reasoning_effort is handled separately via model.Reasoning in adjustReasoningEffort.
+func filterCommonUnsupportedParams(_ string, payload map[string]interface{}) {
 	delete(payload, "store")
 	delete(payload, "max_completion_tokens")
-
-	// Some providers are strict about reasoning_effort
-	if providerName == "Mistral" || providerName == "ollama" || providerName == "OMNI" {
-		delete(payload, "reasoning_effort")
-	}
 }
 
 // buildOllamaBody builds Ollama-compatible request body (native /api/chat)
