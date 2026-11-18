@@ -918,6 +918,10 @@ func (h *StreamableHTTPHandler) handleTestProviderTool(ctx context.Context, w ht
 		writeJSONRPCError(w, req.ID, -32602, "Invalid params", fmt.Sprintf("Provider '%s' not found", providerName))
 		return
 	}
+	if !targetProvider.IsEnabled() {
+		writeJSONRPCError(w, req.ID, -32602, "Invalid params", fmt.Sprintf("Provider '%s' is disabled", providerName))
+		return
+	}
 
 	if len(targetProvider.Models) == 0 {
 		writeJSONRPCError(w, req.ID, -32603, "Internal error", "Provider has no models")

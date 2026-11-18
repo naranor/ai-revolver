@@ -141,6 +141,23 @@ func (wm *WarmupManager) getTop2(cfg config.Config) []ProviderModelPair {
 }
 
 func (wm *WarmupManager) sendWarmupRequest(provider, model string) {
+	// Re-check enabled at send time (config may have changed since getTop2 / debounce).
+	cfg := config.GetConfig()
+	providerEnabled := false
+	for _, p := range cfg.Providers {
+		if p.Name == provider {
+			providerEnabled = p.IsEnabled()
+			break
+		}
+	}
+	if !providerEnabled {
+		logger.Debug().
+			Str("provider", provider).
+			Str("model", model).
+			Msg("Skipping warmup for disabled or unknown provider")
+		return
+	}
+
 	key := makeKey(provider, model)
 
 	wm.mu.Lock()

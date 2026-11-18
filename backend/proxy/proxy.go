@@ -281,11 +281,15 @@ func Proxy(ctx context.Context, req Request) (*Response, int, error) {
 
 // getCandidates returns filtered candidates for the request
 func getCandidates(cfg config.Config, model string, provider string) []ProviderModelPair {
-	// If a specific provider is requested, bypass the 'enabled' check and tiered selection
+	// If a specific provider is requested, skip tiered selection but still honor enabled
+	// (Disarmed / enabled:false) — same rule as sortedProviders for normal traffic.
 	if provider != "" {
 		for _, p := range cfg.Providers {
 			if p.Name != provider {
 				continue
+			}
+			if !p.IsEnabled() {
+				return nil
 			}
 
 			if model != "" && model != "auto" {
