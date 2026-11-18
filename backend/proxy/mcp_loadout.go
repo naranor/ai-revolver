@@ -295,6 +295,10 @@ func (h *StreamableHTTPHandler) handleProbeModelTool(ctx context.Context, w http
 		writeJSONRPCError(w, req.ID, -32602, "Invalid params", "Provider not found")
 		return
 	}
+	if !targetProvider.IsEnabled() {
+		writeJSONRPCError(w, req.ID, -32602, "Invalid params", "Provider is disabled")
+		return
+	}
 
 	// Tool use probe payload
 	probeReq := Request{
@@ -362,6 +366,10 @@ func (h *StreamableHTTPHandler) handleProbeAllModelsTool(ctx context.Context, w 
 		writeJSONRPCError(w, req.ID, -32602, "Invalid params", "Provider not found")
 		return
 	}
+	if !targetProvider.IsEnabled() {
+		writeJSONRPCError(w, req.ID, -32602, "Invalid params", "Provider is disabled")
+		return
+	}
 
 	results := ""
 	for _, m := range targetProvider.Models {
@@ -403,6 +411,10 @@ func (h *StreamableHTTPHandler) handleOptimizeProviderTool(ctx context.Context, 
 	}
 
 	provider := cfg.Providers[pIndex]
+	if !provider.IsEnabled() {
+		writeJSONRPCError(w, req.ID, -32602, "Invalid params", "Provider is disabled")
+		return
+	}
 	type modelLatency struct {
 		model   config.Model
 		latency int64
