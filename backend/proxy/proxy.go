@@ -980,7 +980,8 @@ func buildRequestBody(provider config.Provider, model string, req Request) ([]by
 		return nil, err
 	}
 
-	needsProviderFilter := provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI"
+	providerKey := strings.ToLower(provider.Name)
+	_, needsProviderFilter := providersRejectingReasoningEffort[providerKey]
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -998,7 +999,7 @@ func buildRequestBody(provider config.Provider, model string, req Request) ([]by
 	adjustReasoningEffort(provider.Name, found && modelCfg.Reasoning, payload)
 
 	if needsProviderFilter {
-		adjustProviderPayload(provider.Name, payload)
+		filterCommonUnsupportedParams(provider.Name, payload)
 	}
 
 	adjustedBody, marshalErr := json.Marshal(payload)
@@ -1034,6 +1035,12 @@ func adjustReasoningEffort(providerName string, supportsReasoning bool, payload 
 	providerKey := strings.ToLower(providerName)
 
 	if _, reject := providersRejectingReasoningEffort[providerKey]; reject || !supportsReasoning {
+		if hasEffort || hasReasoningObj {
+			logger.Debug().
+				Str("provider", providerName).
+				Bool("supports_reasoning", supportsReasoning).
+				Msg("stripping reasoning params for candidate")
+		}
 		delete(payload, "reasoning_effort")
 		delete(payload, "reasoning")
 		return
@@ -1066,6 +1073,16 @@ func adjustReasoningEffort(providerName string, supportsReasoning bool, payload 
 	case "opencode":
 		// OpenCode Zen: top-level reasoning_effort only — never forward OpenRouter-shaped reasoning.
 		if hasReasoningObj {
+			if m, ok := reasoningObj.(map[string]interface{}); ok {
+				for k := range m {
+					if k != "effort" {
+						logger.Debug().
+							Str("provider", providerName).
+							Msg("dropping OpenRouter reasoning sibling keys for OpenCode (effort only)")
+						break
+					}
+				}
+			}
 			delete(payload, "reasoning")
 		}
 		if hasEffort {
@@ -1074,11 +1091,6 @@ func adjustReasoningEffort(providerName string, supportsReasoning bool, payload 
 	default:
 		// OpenAI-compatible default: keep reasoning_effort as-is
 	}
-}
-
-// adjustProviderPayload handles all provider-specific parameter adjustments
-func adjustProviderPayload(providerName string, payload map[string]interface{}) {
-	filterCommonUnsupportedParams(providerName, payload)
 }
 
 // filterCommonUnsupportedParams removes parameters that cause 422/400 errors.

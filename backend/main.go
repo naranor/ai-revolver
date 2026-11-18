@@ -223,16 +223,13 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.GetConfig()
 	models := []OpenAIModel{
 		{
-			ID:      "auto",
-			Object:  "model",
-			Created: time.Now().Unix(),
-			OwnedBy: "system",
-			Root:    "auto",
-			Parent:  nil,
-			Capabilities: map[string]interface{}{
-				"description": "Automatically selects the best available provider and model based on performance and availability.",
-				"reasoning":   true,
-			},
+			ID:           "auto",
+			Object:       "model",
+			Created:      time.Now().Unix(),
+			OwnedBy:      "system",
+			Root:         "auto",
+			Parent:       nil,
+			Capabilities: proxy.AutoModelCapabilities(proxy.AnyEnabledModelSupportsReasoning(cfg)),
 		},
 	}
 

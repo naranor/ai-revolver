@@ -189,3 +189,59 @@ func TestStreamableHTTPHandler_Resources(t *testing.T) {
 		}
 	})
 }
+
+func TestStreamableHTTPHandler_ModelsListIncludesAuto(t *testing.T) {
+	logger.Init(false)
+	config.ResetTestConfig()
+
+	config.LoadTestConfig(config.Config{
+		Providers: []config.Provider{
+			{
+				Name:   "openrouter",
+				APIKey: "k",
+				Models: []config.Model{{Name: "alpha", Reasoning: true}},
+			},
+		},
+	})
+
+	handler := NewStreamableHTTPHandler()
+	reqBody := JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "models/list",
+	}
+	data, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBuffer(data))
+	w := httptest.NewRecorder()
+	session := handler.sessions.CreateSession("models-list")
+	req.Header.Set(HeaderMCPSessionID, session.ID)
+	handler.Handle(w, req)
+
+	var resp JSONRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("rpc error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result type %T", resp.Result)
+	}
+	models, ok := result["models"].([]interface{})
+	if !ok || len(models) < 1 {
+		t.Fatalf("expected models, got %#v", result["models"])
+	}
+	auto, ok := models[0].(map[string]interface{})
+	if !ok || auto["id"] != "auto" {
+		t.Fatalf("first model should be auto, got %#v", models[0])
+	}
+	caps, _ := auto["capabilities"].(map[string]interface{})
+	if caps["reasoning"] != true {
+		t.Errorf("auto.reasoning = %v, want true", caps["reasoning"])
+	}
+	desc, _ := caps["description"].(string)
+	if desc != AutoModelCapabilitiesDescription {
+		t.Errorf("auto description mismatch: %q", desc)
+	}
+}

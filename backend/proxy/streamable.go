@@ -966,7 +966,14 @@ func (h *StreamableHTTPHandler) handleTestProviderTool(ctx context.Context, w ht
 func (h *StreamableHTTPHandler) handleModelsList(_ context.Context, w http.ResponseWriter, req JSONRPCRequest, _ *MCPSession) {
 	cfg := config.GetConfig()
 
-	var models []map[string]interface{}
+	models := []map[string]interface{}{
+		{
+			"id":           "auto",
+			"name":         "auto",
+			"provider":     "system",
+			"capabilities": AutoModelCapabilities(AnyEnabledModelSupportsReasoning(cfg)),
+		},
+	}
 	for _, provider := range cfg.Providers {
 		if !provider.IsEnabled() {
 			continue
