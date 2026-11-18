@@ -496,6 +496,155 @@ func TestReasoningEffortFollowsModelCapability(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("only reasoning object maps to opencode reasoning_effort", func(t *testing.T) {
+		rawOnlyReasoning, err := json.Marshal(map[string]interface{}{
+			"reasoning": map[string]interface{}{"effort": "high"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		onlyReasoningReq := Request{
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawOnlyReasoning,
+		}
+		provider := config.Provider{
+			Name:   "opencode",
+			Models: []config.Model{{Name: "alpha", Reasoning: true}},
+		}
+		body, err := buildRequestBody(provider, "alpha", onlyReasoningReq)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		payload := decode(t, body)
+		if payload["reasoning_effort"] != "high" {
+			t.Errorf("reasoning_effort = %v, want high", payload["reasoning_effort"])
+		}
+		if _, ok := payload["reasoning"]; ok {
+			t.Error("opencode must not receive OpenRouter-shaped reasoning")
+		}
+	})
+
+	t.Run("only reasoning object stripped for reject providers", func(t *testing.T) {
+		rawOnlyReasoning, err := json.Marshal(map[string]interface{}{
+			"reasoning": map[string]interface{}{"effort": "medium"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		onlyReasoningReq := Request{
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawOnlyReasoning,
+		}
+		for _, name := range []string{"groq", "Mistral", "ollama", "OMNI"} {
+			provider := config.Provider{
+				Name:   name,
+				Models: []config.Model{{Name: "alpha", Reasoning: true}},
+			}
+			body, err := buildRequestBody(provider, "alpha", onlyReasoningReq)
+			if err != nil {
+				t.Fatalf("%s buildRequestBody() error = %v", name, err)
+			}
+			payload := decode(t, body)
+			if _, ok := payload["reasoning_effort"]; ok {
+				t.Errorf("%s: reasoning_effort should be absent", name)
+			}
+			if _, ok := payload["reasoning"]; ok {
+				t.Errorf("%s: reasoning should be stripped", name)
+			}
+		}
+	})
+
+	t.Run("openrouter merge preserves sibling reasoning keys", func(t *testing.T) {
+		rawMerge, err := json.Marshal(map[string]interface{}{
+			"reasoning_effort": "low",
+			"reasoning": map[string]interface{}{
+				"max_tokens": 2048,
+				"exclude":    true,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		mergeReq := Request{
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawMerge,
+		}
+		provider := config.Provider{
+			Name:   "openrouter",
+			Models: []config.Model{{Name: "alpha", Reasoning: true}},
+		}
+		body, err := buildRequestBody(provider, "alpha", mergeReq)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		payload := decode(t, body)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("reasoning_effort should be rewritten into reasoning.effort")
+		}
+		reasoning, ok := payload["reasoning"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected reasoning object")
+		}
+		if reasoning["effort"] != "low" {
+			t.Errorf("effort = %v, want low", reasoning["effort"])
+		}
+		if reasoning["max_tokens"] != float64(2048) {
+			t.Errorf("max_tokens = %v, want 2048", reasoning["max_tokens"])
+		}
+		if reasoning["exclude"] != true {
+			t.Errorf("exclude = %v, want true", reasoning["exclude"])
+		}
+	})
+
+	t.Run("findProviderModel miss strips reasoning params", func(t *testing.T) {
+		provider := config.Provider{
+			Name:   "openrouter",
+			Models: []config.Model{{Name: "other", Reasoning: true}},
+		}
+		body, err := buildRequestBody(provider, "missing-model", req)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		payload := decode(t, body)
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Error("missing model config should strip reasoning_effort")
+		}
+		if _, ok := payload["reasoning"]; ok {
+			t.Error("missing model config should strip reasoning")
+		}
+	})
+
+	t.Run("auto failover to opencode with only reasoning object", func(t *testing.T) {
+		// Simulates model=auto failing over to OpenCode when the client sent
+		// OpenRouter-native reasoning without top-level reasoning_effort.
+		rawOnlyReasoning, err := json.Marshal(map[string]interface{}{
+			"reasoning": map[string]interface{}{"effort": "high"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		failoverReq := Request{
+			Model:    "auto",
+			Messages: []Message{{Role: "user", Content: "hi"}},
+			RawBody:  rawOnlyReasoning,
+		}
+		provider := config.Provider{
+			Name:   "opencode",
+			Models: []config.Model{{Name: "failover-model", Reasoning: true}},
+		}
+		body, err := buildRequestBody(provider, "failover-model", failoverReq)
+		if err != nil {
+			t.Fatalf("buildRequestBody() error = %v", err)
+		}
+		payload := decode(t, body)
+		if payload["reasoning_effort"] != "high" {
+			t.Errorf("reasoning_effort = %v, want high after OpenCode failover", payload["reasoning_effort"])
+		}
+		if _, ok := payload["reasoning"]; ok {
+			t.Error("failover to opencode must strip OpenRouter-shaped reasoning")
+		}
+	})
 }
 
 func TestAdjustProviderPayload(t *testing.T) {

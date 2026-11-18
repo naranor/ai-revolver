@@ -980,15 +980,24 @@ func buildRequestBody(provider config.Provider, model string, req Request) ([]by
 		return nil, err
 	}
 
+	needsProviderFilter := provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI"
+
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
 
-	modelCfg, _ := findProviderModel(provider, model)
-	adjustReasoningEffort(provider.Name, modelCfg.Reasoning, payload)
+	_, hasEffort := payload["reasoning_effort"]
+	_, hasReasoning := payload["reasoning"]
+	// Skip remashal when there is nothing to adjust (large prompts avoid a second encode).
+	if !hasEffort && !hasReasoning && !needsProviderFilter {
+		return body, nil
+	}
 
-	if provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI" {
+	modelCfg, found := findProviderModel(provider, model)
+	adjustReasoningEffort(provider.Name, found && modelCfg.Reasoning, payload)
+
+	if needsProviderFilter {
 		adjustProviderPayload(provider.Name, payload)
 	}
 
@@ -1021,7 +1030,7 @@ var providersRejectingReasoningEffort = map[string]struct{}{
 // and the target provider's accepted wire format.
 func adjustReasoningEffort(providerName string, supportsReasoning bool, payload map[string]interface{}) {
 	effort, hasEffort := payload["reasoning_effort"]
-	_, hasReasoningObj := payload["reasoning"]
+	reasoningObj, hasReasoningObj := payload["reasoning"]
 	providerKey := strings.ToLower(providerName)
 
 	if _, reject := providersRejectingReasoningEffort[providerKey]; reject || !supportsReasoning {
@@ -1029,12 +1038,23 @@ func adjustReasoningEffort(providerName string, supportsReasoning bool, payload 
 		delete(payload, "reasoning")
 		return
 	}
-	if !hasEffort {
-		return
+
+	// Client may send OpenRouter-native {"reasoning":{"effort":"..."}} without
+	// top-level reasoning_effort. Extract effort so OpenCode (and similar) can map it.
+	if !hasEffort && hasReasoningObj {
+		if m, ok := reasoningObj.(map[string]interface{}); ok {
+			if e, ok := m["effort"]; ok {
+				effort = e
+				hasEffort = true
+			}
+		}
 	}
 
 	switch providerKey {
 	case "openrouter", "kilocode", "kilo":
+		if !hasEffort {
+			return
+		}
 		// OpenRouter / Kilo Gateway: native shape is reasoning.effort
 		delete(payload, "reasoning_effort")
 		if existing, ok := payload["reasoning"].(map[string]interface{}); ok {
@@ -1044,9 +1064,12 @@ func adjustReasoningEffort(providerName string, supportsReasoning bool, payload 
 			payload["reasoning"] = map[string]interface{}{"effort": effort}
 		}
 	case "opencode":
-		// OpenCode Zen chat completions: top-level reasoning_effort
+		// OpenCode Zen: top-level reasoning_effort only — never forward OpenRouter-shaped reasoning.
 		if hasReasoningObj {
 			delete(payload, "reasoning")
+		}
+		if hasEffort {
+			payload["reasoning_effort"] = effort
 		}
 	default:
 		// OpenAI-compatible default: keep reasoning_effort as-is
