@@ -208,53 +208,97 @@ func TestStatsHistoryHandler_Error(t *testing.T) {
 }
 
 func TestModelsHandler(t *testing.T) {
-	// Mock the config.GetConfig function
-	originalGetConfig := config.GetConfig
-	config.GetConfig = func() config.Config {
-		return config.Config{
-			Providers: []config.Provider{
-				{
-					Name: "test-provider",
-					Models: []config.Model{
-						{
-							Name: "test-model",
+	t.Run("auto reasoning false when no enabled reasoning model", func(t *testing.T) {
+		originalGetConfig := config.GetConfig
+		config.GetConfig = func() config.Config {
+			return config.Config{
+				Providers: []config.Provider{
+					{
+						Name: "test-provider",
+						Models: []config.Model{
+							{Name: "test-model"},
 						},
 					},
 				},
-			},
+			}
 		}
-	}
-	defer func() {
-		config.GetConfig = originalGetConfig
-	}()
+		defer func() {
+			config.GetConfig = originalGetConfig
+		}()
 
-	req, err := http.NewRequestWithContext(context.Background(), 
-"GET", "/api/v1/models", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+		req, err := http.NewRequestWithContext(context.Background(),
+			"GET", "/api/v1/models", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(modelsHandler)
+		rr := httptest.NewRecorder()
+		handler := http.HandlerFunc(modelsHandler)
+		handler.ServeHTTP(rr, req)
 
-	handler.ServeHTTP(rr, req)
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v",
+				status, http.StatusOK)
+		}
 
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
+		var models OpenAIModelsList
+		if err := json.Unmarshal(rr.Body.Bytes(), &models); err != nil {
+			t.Fatalf("Failed to unmarshal response body: %v", err)
+		}
 
-	var models OpenAIModelsList
-	if err := json.Unmarshal(rr.Body.Bytes(), &models); err != nil {
-		t.Fatalf("Failed to unmarshal response body: %v", err)
-	}
+		if len(models.Data) != 2 {
+			t.Fatalf("Expected 2 models, got %d", len(models.Data))
+		}
+		if models.Data[0].ID != "auto" {
+			t.Fatalf("Expected first model auto, got %s", models.Data[0].ID)
+		}
+		if models.Data[0].Capabilities["reasoning"] != false {
+			t.Errorf("auto.reasoning = %v, want false", models.Data[0].Capabilities["reasoning"])
+		}
+		desc, _ := models.Data[0].Capabilities["description"].(string)
+		if !strings.Contains(desc, "maps or strips") {
+			t.Errorf("auto description missing map/strip note: %q", desc)
+		}
+		if !strings.Contains(desc, "OpenCode failover") {
+			t.Errorf("auto description missing OpenCode note: %q", desc)
+		}
+		if models.Data[1].ID != "test-provider/test-model" {
+			t.Errorf("Expected model ID to be 'test-provider/test-model', got '%s'", models.Data[1].ID)
+		}
+	})
 
-	if len(models.Data) != 2 {
-		t.Fatalf("Expected 2 models, got %d", len(models.Data))
-	}
-	if models.Data[1].ID != "test-provider/test-model" {
-		t.Errorf("Expected model ID to be 'test-provider/test-model', got '%s'", models.Data[1].ID)
-	}
+	t.Run("auto reasoning true when enabled reasoning model exists", func(t *testing.T) {
+		originalGetConfig := config.GetConfig
+		config.GetConfig = func() config.Config {
+			return config.Config{
+				Providers: []config.Provider{
+					{
+						Name:   "openrouter",
+						Models: []config.Model{{Name: "alpha", Reasoning: true}},
+					},
+				},
+			}
+		}
+		defer func() {
+			config.GetConfig = originalGetConfig
+		}()
+
+		req, err := http.NewRequestWithContext(context.Background(),
+			"GET", "/api/v1/models", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr := httptest.NewRecorder()
+		http.HandlerFunc(modelsHandler).ServeHTTP(rr, req)
+
+		var models OpenAIModelsList
+		if err := json.Unmarshal(rr.Body.Bytes(), &models); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if models.Data[0].Capabilities["reasoning"] != true {
+			t.Errorf("auto.reasoning = %v, want true", models.Data[0].Capabilities["reasoning"])
+		}
+	})
 }
 
 func TestConfigHandler(t *testing.T) {

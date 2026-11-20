@@ -980,52 +980,124 @@ func buildRequestBody(provider config.Provider, model string, req Request) ([]by
 		return nil, err
 	}
 
-	// Only unmarshal and adjust if the provider requires specific fixes
-	if provider.Name == "groq" || provider.Name == "ollama" || provider.Name == "Mistral" || provider.Name == "OMNI" {
-		var payload map[string]interface{}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, err
-		}
+	providerKey := strings.ToLower(provider.Name)
+	_, needsProviderFilter := providersRejectingReasoningEffort[providerKey]
 
-		adjustProviderPayload(provider.Name, payload)
-
-		adjustedBody, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		return adjustedBody, nil
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
 	}
 
-	return body, nil
-}
-
-// adjustProviderPayload handles all provider-specific parameter adjustments
-func adjustProviderPayload(providerName string, payload map[string]interface{}) {
-	// 1. Groq specific reasoning_effort adjustment
-	if providerName == "groq" {
-		adjustGroqReasoningEffort(payload)
+	_, hasEffort := payload["reasoning_effort"]
+	_, hasReasoning := payload["reasoning"]
+	// Skip remashal when there is nothing to adjust (large prompts avoid a second encode).
+	if !hasEffort && !hasReasoning && !needsProviderFilter {
+		return body, nil
 	}
 
-	// 2. Common parameter filtering for non-OpenAI-native providers
-	filterCommonUnsupportedParams(providerName, payload)
+	modelCfg, found := findProviderModel(provider, model)
+	adjustReasoningEffort(provider.Name, found && modelCfg.Reasoning, payload)
+
+	if needsProviderFilter {
+		filterCommonUnsupportedParams(provider.Name, payload)
+	}
+
+	adjustedBody, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	return adjustedBody, nil
 }
 
-// adjustGroqReasoningEffort ensures reasoning_effort is compatible with Groq
-func adjustGroqReasoningEffort(payload map[string]interface{}) {
-	// Some Groq models don't support reasoning_effort at all
-	delete(payload, "reasoning_effort")
+// findProviderModel returns the configured model entry for a provider.
+func findProviderModel(provider config.Provider, modelName string) (config.Model, bool) {
+	for _, m := range provider.Models {
+		if m.Name == modelName {
+			return m, true
+		}
+	}
+	return config.Model{}, false
 }
 
-// filterCommonUnsupportedParams removes parameters that cause 422/400 errors
-func filterCommonUnsupportedParams(providerName string, payload map[string]interface{}) {
-	// These fields are OpenAI-specific and often cause failures elsewhere
+// providersRejectingReasoningEffort always drop reasoning params even if model.Reasoning is true.
+var providersRejectingReasoningEffort = map[string]struct{}{
+	"groq":    {},
+	"mistral": {},
+	"ollama":  {},
+	"omni":    {},
+}
+
+// adjustReasoningEffort maps or strips reasoning_effort based on model.Reasoning
+// and the target provider's accepted wire format.
+func adjustReasoningEffort(providerName string, supportsReasoning bool, payload map[string]interface{}) {
+	effort, hasEffort := payload["reasoning_effort"]
+	reasoningObj, hasReasoningObj := payload["reasoning"]
+	providerKey := strings.ToLower(providerName)
+
+	if _, reject := providersRejectingReasoningEffort[providerKey]; reject || !supportsReasoning {
+		if hasEffort || hasReasoningObj {
+			logger.Debug().
+				Str("provider", providerName).
+				Bool("supports_reasoning", supportsReasoning).
+				Msg("stripping reasoning params for candidate")
+		}
+		delete(payload, "reasoning_effort")
+		delete(payload, "reasoning")
+		return
+	}
+
+	// Client may send OpenRouter-native {"reasoning":{"effort":"..."}} without
+	// top-level reasoning_effort. Extract effort so OpenCode (and similar) can map it.
+	if !hasEffort && hasReasoningObj {
+		if m, ok := reasoningObj.(map[string]interface{}); ok {
+			if e, ok := m["effort"]; ok {
+				effort = e
+				hasEffort = true
+			}
+		}
+	}
+
+	switch providerKey {
+	case "openrouter", "kilocode", "kilo":
+		if !hasEffort {
+			return
+		}
+		// OpenRouter / Kilo Gateway: native shape is reasoning.effort
+		delete(payload, "reasoning_effort")
+		if existing, ok := payload["reasoning"].(map[string]interface{}); ok {
+			existing["effort"] = effort
+			payload["reasoning"] = existing
+		} else {
+			payload["reasoning"] = map[string]interface{}{"effort": effort}
+		}
+	case "opencode":
+		// OpenCode Zen: top-level reasoning_effort only — never forward OpenRouter-shaped reasoning.
+		if hasReasoningObj {
+			if m, ok := reasoningObj.(map[string]interface{}); ok {
+				for k := range m {
+					if k != "effort" {
+						logger.Debug().
+							Str("provider", providerName).
+							Msg("dropping OpenRouter reasoning sibling keys for OpenCode (effort only)")
+						break
+					}
+				}
+			}
+			delete(payload, "reasoning")
+		}
+		if hasEffort {
+			payload["reasoning_effort"] = effort
+		}
+	default:
+		// OpenAI-compatible default: keep reasoning_effort as-is
+	}
+}
+
+// filterCommonUnsupportedParams removes parameters that cause 422/400 errors.
+// reasoning_effort is handled separately via model.Reasoning in adjustReasoningEffort.
+func filterCommonUnsupportedParams(_ string, payload map[string]interface{}) {
 	delete(payload, "store")
 	delete(payload, "max_completion_tokens")
-
-	// Some providers are strict about reasoning_effort
-	if providerName == "Mistral" || providerName == "ollama" || providerName == "OMNI" {
-		delete(payload, "reasoning_effort")
-	}
 }
 
 // buildOllamaBody builds Ollama-compatible request body (native /api/chat)
